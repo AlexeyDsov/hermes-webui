@@ -1265,12 +1265,21 @@ function _sessionTimeBucketLabel(timestampMs, nowMs) {
 
 function _sessionLineageKey(s, sessionIdsInList){
   if(!s||!s.session_id) return null;
+  // If lineage_root_id is set, use it as the grouping key (#1370 follow-up).
+  // This properly groups fork chains in the sidebar.
+  if(s.lineage_root_id){
+    return s.lineage_root_id;
+  }
+  // Fallback to lineage_tip_id if available
+  if(s.lineage_tip_id){
+    return s.lineage_tip_id;
+  }
   // If parent_session_id points to another session in the current list,
   // this is a subagent child — don't collapse it into lineage (#494).
   if(s.parent_session_id && sessionIdsInList && sessionIdsInList.has(s.parent_session_id)){
     return null;
   }
-  return s._lineage_root_id || s.lineage_root_id || s.parent_session_id || null;
+  return s.parent_session_id || null;
 }
 
 function _sessionLineageContainsSession(s, sid){

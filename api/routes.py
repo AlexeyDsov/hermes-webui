@@ -2204,6 +2204,12 @@ def handle_post(handler, parsed) -> bool:
             source_title = source.title or "Untitled"
             branch_title = f"{source_title} (fork)"
 
+        # Compute lineage metadata for proper sidebar grouping (#1370)
+        # lineage_root_id is the topmost ancestor (no parent or parent ends with compression/cli_close)
+        # lineage_tip_id is this branch session itself
+        lineage_root_id = getattr(source, 'lineage_root_id', source.session_id)
+        lineage_tip_id = branch.session_id
+
         # Create new session inheriting workspace/model/profile
         branch = Session(
             workspace=source.workspace,
@@ -2212,6 +2218,8 @@ def handle_post(handler, parsed) -> bool:
             title=branch_title,
             messages=forked_messages,
             parent_session_id=source.session_id,
+            lineage_root_id=lineage_root_id,
+            lineage_tip_id=lineage_tip_id,
         )
         with LOCK:
             SESSIONS[branch.session_id] = branch

@@ -317,11 +317,13 @@ class Session:
                  pending_attachments=None,
                  pending_started_at=None,
                  context_messages=None,
-                 compression_anchor_visible_idx=None,
-                 compression_anchor_message_key=None,
-                 context_length=None, threshold_tokens=None,
-                 last_prompt_tokens=None,
+               compression_anchor_visible_idx=None,
+                compression_anchor_message_key=None,
+                context_length=None, threshold_tokens=None,
+                last_prompt_tokens=None,
                 parent_session_id: str=None,
+                lineage_root_id: str=None,
+                lineage_tip_id: str=None,
                 enabled_toolsets=None,
                 **kwargs):
         self.session_id = session_id or uuid.uuid4().hex[:12]
@@ -352,6 +354,8 @@ class Session:
         self.threshold_tokens = threshold_tokens
         self.last_prompt_tokens = last_prompt_tokens
         self.parent_session_id = parent_session_id
+        self.lineage_root_id = lineage_root_id
+        self.lineage_tip_id = lineage_tip_id
         self.is_cli_session = bool(kwargs.get('is_cli_session', False))
         self.source_tag = kwargs.get('source_tag')
         self.session_source = kwargs.get('session_source')
@@ -377,7 +381,7 @@ class Session:
             'pending_user_message', 'pending_attachments', 'pending_started_at',
             'compression_anchor_visible_idx', 'compression_anchor_message_key',
             'context_length', 'threshold_tokens', 'last_prompt_tokens',
-            'parent_session_id',
+            'parent_session_id', 'lineage_root_id', 'lineage_tip_id',
             'is_cli_session', 'source_tag', 'session_source', 'source_label',
             'enabled_toolsets',
         ]
@@ -434,7 +438,7 @@ class Session:
             if not prefix:
                 return cls.load(sid)
             parsed = json.loads(prefix)
-            needed = {'session_id', 'title', 'created_at', 'updated_at', 'parent_session_id'}
+            needed = {'session_id', 'title', 'created_at', 'updated_at', 'parent_session_id', 'lineage_root_id', 'lineage_tip_id'}
             if not needed.issubset(parsed.keys()):
                 return cls.load(sid)
             parsed['messages'] = []
@@ -475,10 +479,13 @@ class Session:
             'context_length': self.context_length,
             'threshold_tokens': self.threshold_tokens,
             'last_prompt_tokens': self.last_prompt_tokens,
-            # Only emit 'parent_session_id' when set (the /branch fork link, #1342).
-            # Sessions without a fork must not leak None — see test_session_lineage_metadata_api.
-            **({'parent_session_id': self.parent_session_id} if self.parent_session_id else {}),
-            'active_stream_id': self.active_stream_id,
+        # Only emit 'parent_session_id' when set (the /branch fork link, #1342).
+        # Sessions without a fork must not leak None — see test_session_lineage_metadata_api.
+        **({'parent_session_id': self.parent_session_id} if self.parent_session_id else {}),
+        # Lineage metadata for proper sidebar grouping (#1370)
+        'lineage_root_id': self.lineage_root_id,
+        'lineage_tip_id': self.lineage_tip_id,
+        'active_stream_id': self.active_stream_id,
             'is_cli_session': self.is_cli_session,
             'source_tag': self.source_tag,
             'session_source': self.session_source,
