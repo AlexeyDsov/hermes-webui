@@ -1643,6 +1643,9 @@ function renderSessionListFromCache(){
 
     // Rename: called directly when we confirm it's a double-click
     const startRename=()=>{
+      // Guard: prevent renaming if session is currently being loaded
+      if (_loadingSessionId && _loadingSessionId !== s.session_id) return;
+
       closeSessionActionMenu();
       _renamingSid = s.session_id;
       const oldTitle=s.title||'Untitled';
@@ -1794,6 +1797,16 @@ function renderSessionListFromCache(){
         await loadSession(s.session_id);renderSessionListFromCache();
         if(typeof closeMobileSidebar==='function')closeMobileSidebar();
       }, delay);
+    };
+    // Add ondblclick for more reliable double-click detection
+    el.ondblclick=(e)=>{
+      if(e.pointerType==='mouse' && e.button!==0) return;
+      if(_renamingSid) return;
+      if(actions.contains(e.target)) return;
+      if(_sessionSelectMode){e.stopPropagation();toggleSessionSelect(s.session_id);return;}
+      // Guard: prevent renaming if session is currently being loaded
+      if (_loadingSessionId && _loadingSessionId !== s.session_id) return;
+      startRename();
     };
     return el;
   }
