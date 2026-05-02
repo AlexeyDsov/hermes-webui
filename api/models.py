@@ -434,7 +434,7 @@ class Session:
             if not prefix:
                 return cls.load(sid)
             parsed = json.loads(prefix)
-            needed = {'session_id', 'title', 'created_at', 'updated_at'}
+            needed = {'session_id', 'title', 'created_at', 'updated_at', 'parent_session_id'}
             if not needed.issubset(parsed.keys()):
                 return cls.load(sid)
             parsed['messages'] = []
