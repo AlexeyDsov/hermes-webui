@@ -43,7 +43,7 @@ from api.metering import meter
 from api.run_journal import RunJournalWriter
 from api.turn_journal import append_turn_journal_event_for_stream
 from api.usage import prompt_cache_hit_percent
-from api.models import get_state_db_session_messages, reconciled_state_db_messages_for_session
+from api.models import get_state_db_session_messages, reconciled_state_db_messages_for_session, _message_timestamp_as_float
 
 # Global lock for os.environ writes. Per-session locks (_agent_lock) prevent
 # concurrent runs of the SAME session, but two DIFFERENT sessions can still
@@ -4860,6 +4860,28 @@ def _run_agent_streaming(
                     _previous_context_messages,
                     _next_context_messages,
                 )
+                # When a truncation watermark is active (user did Edit/Regenerate/undo/retry),
+                # the agent's _result_messages may contain the full state.db history
+                # including turns the user deliberately removed.  If we blindly assign
+                # those to context_messages, the next turn will feed the agent the
+                # "deleted" rows again (#2914).  Clamp context_messages to the watermark
+                # boundary so only messages the user kept are retained.
+                _tw = getattr(s, 'truncation_watermark', None)
+                if _tw is not None:
+                    _tw_ts = _message_timestamp_as_float({'timestamp': _tw})
+                    if _tw_ts is not None:
+                        _clamped = [
+                            m for m in _next_context_messages
+                            if (m_ts := _message_timestamp_as_float(m)) is None or m_ts <= _tw_ts
+                        ]
+                        if len(_clamped) != len(_next_context_messages):
+                            logger.info(
+                                "clamping context_messages after agent result: %d → %d "
+                                "(watermark=%.2f, session=%s)",
+                                len(_next_context_messages), len(_clamped),
+                                _tw_ts, s.session_id,
+                            )
+                            _next_context_messages = _clamped
                 s.context_messages = _deduplicate_context_messages(_next_context_messages)
                 s.messages = _merge_display_messages_after_agent_result(
                     _previous_messages,
@@ -5007,6 +5029,23 @@ def _run_agent_streaming(
                                     _previous_context_messages,
                                     _next_context_messages,
                                 )
+                                # Clamp to truncation watermark if active (#2914).
+                                _tw = getattr(s, 'truncation_watermark', None)
+                                if _tw is not None:
+                                    _tw_ts = _message_timestamp_as_float({'timestamp': _tw})
+                                    if _tw_ts is not None:
+                                        _clamped = [
+                                            m for m in _next_context_messages
+                                            if (m_ts := _message_timestamp_as_float(m)) is None or m_ts <= _tw_ts
+                                        ]
+                                        if len(_clamped) != len(_next_context_messages):
+                                            logger.info(
+                                                "clamping context_messages after heal result: %d → %d "
+                                                "(watermark=%.2f, session=%s)",
+                                                len(_next_context_messages), len(_clamped),
+                                                _tw_ts, s.session_id,
+                                            )
+                                            _next_context_messages = _clamped
                                 s.context_messages = _deduplicate_context_messages(_next_context_messages)
                                 s.messages = _merge_display_messages_after_agent_result(
                                     _previous_messages,
@@ -5878,6 +5917,23 @@ def _run_agent_streaming(
                                     _previous_context_messages,
                                     _next_context_messages,
                                 )
+                                # Clamp to truncation watermark if active (#2914).
+                                _tw = getattr(s, 'truncation_watermark', None)
+                                if _tw is not None:
+                                    _tw_ts = _message_timestamp_as_float({'timestamp': _tw})
+                                    if _tw_ts is not None:
+                                        _clamped = [
+                                            m for m in _next_context_messages
+                                            if (m_ts := _message_timestamp_as_float(m)) is None or m_ts <= _tw_ts
+                                        ]
+                                        if len(_clamped) != len(_next_context_messages):
+                                            logger.info(
+                                                "clamping context_messages after heal result (except path): %d → %d "
+                                                "(watermark=%.2f, session=%s)",
+                                                len(_next_context_messages), len(_clamped),
+                                                _tw_ts, s.session_id,
+                                            )
+                                            _next_context_messages = _clamped
                                 s.context_messages = _deduplicate_context_messages(_next_context_messages)
                                 s.messages = _merge_display_messages_after_agent_result(
                                     _previous_messages,
