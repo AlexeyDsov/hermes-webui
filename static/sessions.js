@@ -315,7 +315,10 @@ function _hasUnreadForSession(s) {
 }
 
 function _isSessionActivelyViewedForList(sid) {
-  if (!sid || !S.session || S.session.session_id !== sid) return false;
+  if (!sid) return false;
+  const isActive = S.session && S.session.session_id === sid;
+  const isLoading = typeof _loadingSessionId !== 'undefined' && _loadingSessionId === sid;
+  if (!isActive && !isLoading) return false;
   if (typeof _loadingSessionId !== 'undefined' && _loadingSessionId && _loadingSessionId !== sid) return false;
   if (typeof document !== 'undefined' && document.visibilityState && document.visibilityState !== 'visible') return false;
   if (typeof document !== 'undefined' && typeof document.hasFocus === 'function' && !document.hasFocus()) return false;
@@ -4992,10 +4995,13 @@ function renderSessionListFromCache(){
       clearTimeout(_tapTimer);
       const delay=pointerType==='mouse'?0:300;
       if(pointerType!=='mouse') el.classList.add('loading');
+      // Set _loadingSessionId immediately so a sidebar poll that races with
+      // the tap delay does not flag this session as unread (#3306).
+      _loadingSessionId = s.session_id;
       _tapTimer=setTimeout(async()=>{
         _tapTimer=null;
         _lastTapTime=0;
-        if(_renamingSid) return;
+        if(_renamingSid) {_loadingSessionId=null; return;}
         // For CLI sessions, import into WebUI store first (idempotent)
         if(s.is_cli_session){
           try{
@@ -5008,6 +5014,8 @@ function renderSessionListFromCache(){
           if(typeof closeMobileSidebar==='function')closeMobileSidebar();
         }finally{
           el.classList.remove('loading');
+          // Clear in case loadSession bailed early (e.g. stale response)
+          if(_loadingSessionId === s.session_id) _loadingSessionId = null;
         }
       }, delay);
       return false;
