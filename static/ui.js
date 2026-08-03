@@ -16013,16 +16013,33 @@ function renderMessages(options){
   const _isRenderableRawIdx=(idx)=>idx>=visRawMin&&idx<=visRawMax;
   // P0 optimization: find the last user message before the window start,
   // then only scan the render window for assistants.
+  // Seed for the head slice.
   if(_visScanStart>0){
     for(let i=_visScanStart-1;i>=0;i--){
       const m=visWithIdx[i]&&visWithIdx[i].m;
       if(m&&m.role==='user'){lastQuestionRawIdx=visWithIdx[i].rawIdx;break;}
     }
   }
-  for(const entry of renderVisWithIdx){
+  // Process head slice.
+  for(const entry of renderHeadVisWithIdx){
     const role=entry&&entry.m&&entry.m.role;
     if(role==='user') lastQuestionRawIdx=entry.rawIdx;
     else if(role==='assistant') questionRawIdxByAssistantRawIdx.set(entry.rawIdx,lastQuestionRawIdx);
+  }
+  // Process tail slice, but reset lastQuestionRawIdx first — the gap
+  // [windowEnd, renderTailStart) may contain user messages that the head
+  // never saw, so the first tail assistant must not inherit the head's seed.
+  if(renderTailVisWithIdx.length>0){
+    lastQuestionRawIdx=-1;
+    for(let i=renderTailStart-1;i>=0;i--){
+      const m=visWithIdx[i]&&visWithIdx[i].m;
+      if(m&&m.role==='user'){lastQuestionRawIdx=visWithIdx[i].rawIdx;break;}
+    }
+    for(const entry of renderTailVisWithIdx){
+      const role=entry&&entry.m&&entry.m.role;
+      if(role==='user') lastQuestionRawIdx=entry.rawIdx;
+      else if(role==='assistant') questionRawIdxByAssistantRawIdx.set(entry.rawIdx,lastQuestionRawIdx);
+    }
   }
   const assistantRawIdxByQuestionRawIdx=new Map();
   for(const [aIdx,qIdx] of questionRawIdxByAssistantRawIdx){

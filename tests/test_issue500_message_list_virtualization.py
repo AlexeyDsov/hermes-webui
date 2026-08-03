@@ -1141,3 +1141,55 @@ console.log(JSON.stringify({
     assert metrics["timerCleared"] is True, (
         "_clearMessageVirtualHeightCache must call clearTimeout on the pending settle timer"
     )
+
+
+def test_question_map_does_not_cross_virtualized_head_tail_gap():
+    """Regression: when renderVisWithIdx has disjoint head and tail slices,
+    the questionRawIdxByAssistantRawIdx map must not carry lastQuestionRawIdx
+    across the omitted gap — the first assistant in the tail must map to the
+    last user *before* the tail (which may be in the gap), not the last user
+    in the head.
+
+    Scenario (visWithIdx indices):
+      0-19:  head slice (rendered)
+      20-39: gap (virtualized away)
+      40-59: tail slice (rendered)
+
+    User at visWithIdx[30] (rawIdx=30) lives in the gap.
+    Assistant at visWithIdx[40] (rawIdx=40) is the first tail entry.
+    The map must link assistant 40 -> user 30, NOT to the last head user.
+
+    This test verifies the source structure: renderMessages() must process
+    head and tail as separate slices, resetting lastQuestionRawIdx between them.
+    """
+    js = UI_JS_PATH.read_text(encoding="utf-8")
+    render_start = js.index("function renderMessages(options)")
+    render_end = js.index("function _toolDisplayName", render_start)
+    render_body = js[render_start:render_end]
+
+    # The question map must process head and tail as separate slices.
+    assert "for(const entry of renderHeadVisWithIdx)" in render_body, (
+        "renderMessages must iterate renderHeadVisWithIdx for question mapping"
+    )
+    assert "for(const entry of renderTailVisWithIdx)" in render_body, (
+        "renderMessages must iterate renderTailVisWithIdx for question mapping"
+    )
+    # The single-loop pattern that carried state across the gap must be absent.
+    # Find the question-map block and verify it does NOT use renderVisWithIdx.
+    qmap_start = render_body.index("questionRawIdxByAssistantRawIdx=new Map()")
+    # Look for the end of the question-map block (the reverse map declaration).
+    qmap_end = render_body.index("assistantRawIdxByQuestionRawIdx=new Map()", qmap_start)
+    qmap_block = render_body[qmap_start:qmap_end]
+    assert "for(const entry of renderVisWithIdx)" not in qmap_block, (
+        "question map must not iterate renderVisWithIdx as a single concatenated "
+        "array — that carries lastQuestionRawIdx across the head/tail gap"
+    )
+    # lastQuestionRawIdx must be reset before the tail slice.
+    assert "lastQuestionRawIdx=-1" in qmap_block, (
+        "lastQuestionRawIdx must be reset to -1 before processing the tail slice"
+    )
+    # The tail seed must scan backward from renderTailStart.
+    assert "renderTailStart-1" in qmap_block, (
+        "tail slice must re-seed lastQuestionRawIdx by scanning backward from "
+        "renderTailStart to find the last user in the gap"
+    )
