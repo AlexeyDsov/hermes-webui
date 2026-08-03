@@ -595,6 +595,7 @@ def test_render_messages_keeps_anchor_owned_turn_out_of_legacy_activity_rebuilds
         function _latestCompressionReferenceMessage() {{ return {{ message: null, rawIdx: -1 }}; }}
         function _shouldShowSettledCompressionReference() {{ return false; }}
         function _applySessionNavigationPrefs() {{}}
+        function _findRunStartForWindow(visWithIdx, windowStart) {{ return windowStart; }}
         function _messageVirtualSpacer() {{ return new FakeElement('div'); }}
         function _compressionAnchorIndex() {{ return null; }}
         function _assistantTurnFinalVisibleContentMap() {{ return new Map(); }}
