@@ -628,18 +628,67 @@ function _messageIsRenderable(m){
   return !!(msgContent(m)||m._statusCard||m.attachments?.length||(m.role==='assistant'&&(hasReasoningAnchor||hasAssistantVisibleAnchor)));
 }
 function _getVisibleMessagesWithIdx(){
-  if(!_visWithIdxCache || _visWithIdxCacheLen !== S.messages.length || _visWithIdxCacheSrc !== S.messages){
-    const rebuilt=[];
-    let rawIdx=0;
-    for(const m of (S.messages||[])){
-      if(_messageIsRenderable(m)) rebuilt.push({m,rawIdx});
-      rawIdx++;
-    }
-    _visWithIdxCache=rebuilt;
-    _visWithIdxCacheLen=S.messages.length;
-    _visWithIdxCacheSrc=S.messages;
+  const msgs=S.messages||[];
+  const len=msgs.length;
+
+  // Fast path: cache is still valid (same reference, same length).
+  if(_visWithIdxCache && _visWithIdxCacheLen===len && _visWithIdxCacheSrc===msgs){
+    return _visWithIdxCache;
   }
+
+  // Incremental append: if the new array starts with the same elements
+  // as the previous source and is same-or-longer, only process the tail.
+  // This covers [...S.messages, newMsg], _mergeInflightTailMessages, and
+  // any other append-only replacement without re-scanning the prefix.
+  if(_visWithIdxCache && _visWithIdxCacheSrc && len>=_visWithIdxCacheLen && _visWithIdxCacheLen>0){
+    const oldSrc=_visWithIdxCacheSrc;
+    const oldLen=_visWithIdxCacheLen;
+    let prefixMatch=true;
+    for(let i=0;i<oldLen;i++){
+      if(msgs[i]!==oldSrc[i]){
+        prefixMatch=false;
+        break;
+      }
+    }
+    if(prefixMatch){
+      const appended=[..._visWithIdxCache];
+      let rawIdx=oldLen;
+      for(let i=oldLen;i<len;i++){
+        const m=msgs[i];
+        if(_messageIsRenderable(m)) appended.push({m,rawIdx});
+        rawIdx++;
+      }
+      _visWithIdxCache=appended;
+      _visWithIdxCacheLen=len;
+      _visWithIdxCacheSrc=msgs;
+      return _visWithIdxCache;
+    }
+  }
+
+  // Full rebuild (wholesale replace, prepend, shrink, or first call).
+  const rebuilt=[];
+  let rawIdx=0;
+  for(const m of msgs){
+    if(_messageIsRenderable(m)) rebuilt.push({m,rawIdx});
+    rawIdx++;
+  }
+  _visWithIdxCache=rebuilt;
+  _visWithIdxCacheLen=len;
+  _visWithIdxCacheSrc=msgs;
   return _visWithIdxCache;
+}
+// Find the start index in visWithIdx of the assistant-run that contains
+// visWithIdx[windowStart].  Scans backward from windowStart to the nearest
+// non-assistant message (or index 0) so the caller can limit full-array
+// iterations to just the relevant run.
+function _findRunStartForWindow(visWithIdx, windowStart){
+  let i=windowStart;
+  while(i>0){
+    const m=visWithIdx[i-1]&&visWithIdx[i-1].m;
+    if(m&&m.role==='assistant') i--;
+    else break;
+  }
+  return i;
 }
 function _messageVirtualWindow(opts){
   const total=Math.max(0, Number(opts&&opts.total)||0);
@@ -751,12 +800,25 @@ function _messageVirtualHeightPrefixEntryMatches(previousEntry, nextEntry){
   );
 }
 function _syncMessageVirtualHeightCache(visWithIdx){
+  const msgs=S.messages||[];
+  const len=msgs.length;
+  // Fast path: if S.messages hasn't changed, the height cache is still valid.
+  // Check BEFORE building nextEntries to avoid O(N) map on every scroll.
+  if(
+    _messageVirtualHeightCacheLen===len &&
+    _messageVirtualHeightCacheSrc===msgs &&
+    Array.isArray(_messageVirtualHeightCacheEntries)
+  ){
+    // Only verify visWithIdx length matches (cheap — no allocation).
+    // If visWithIdx length changed, the entries must have changed too.
+    if(_messageVirtualHeightCacheEntries.length===visWithIdx.length) return;
+  }
   const nextEntries=Array.isArray(visWithIdx)
     ? visWithIdx.map(entry=>entry?{rawIdx:entry.rawIdx,m:entry.m}:entry)
     : [];
   if(
-    _messageVirtualHeightCacheLen===S.messages.length &&
-    _messageVirtualHeightCacheSrc===S.messages &&
+    _messageVirtualHeightCacheLen===len &&
+    _messageVirtualHeightCacheSrc===msgs &&
     _messageVirtualHeightCacheEntries.length===nextEntries.length
   ) return;
   const previousEntries=Array.isArray(_messageVirtualHeightCacheEntries)?_messageVirtualHeightCacheEntries:[];
@@ -766,8 +828,8 @@ function _syncMessageVirtualHeightCache(visWithIdx){
     nextHeights=new Array(nextEntries.length);
   }else if(!nextEntries.length){
     _clearMessageVirtualHeightCache();
-    _messageVirtualHeightCacheLen=S.messages.length;
-    _messageVirtualHeightCacheSrc=S.messages;
+    _messageVirtualHeightCacheLen=len;
+    _messageVirtualHeightCacheSrc=msgs;
     return;
   }else{
     const sharedPrefix=Math.min(previousEntries.length,nextEntries.length);
@@ -806,8 +868,8 @@ function _syncMessageVirtualHeightCache(visWithIdx){
     _messageVirtualWindowKey='';
   }
   _messageVirtualHeightCacheEntries=nextEntries;
-  _messageVirtualHeightCacheLen=S.messages.length;
-  _messageVirtualHeightCacheSrc=S.messages;
+  _messageVirtualHeightCacheLen=len;
+  _messageVirtualHeightCacheSrc=msgs;
 }
 function _messageVirtualRoleForEntry(entry){
   const m=entry&&entry.m;
@@ -6019,9 +6081,9 @@ if(typeof window!=='undefined'){
   },{capture:true,passive:true});
   let _scrollRaf=0;
   el.addEventListener('scroll',()=>{
-    _scheduleMessageVirtualizedRender();
     if(_programmaticScroll&&(performance.now()-_programmaticScrollSetAt)>150) _programmaticScroll=false;
     if(_programmaticScroll) return;
+    _scheduleMessageVirtualizedRender();
     _markMessageVirtualScrollActive();
     cancelAnimationFrame(_scrollRaf);
     _scrollRaf=requestAnimationFrame(()=>{
@@ -14373,9 +14435,15 @@ function _hasActiveTodoItems(items){
   });
 }
 function _latestPreservedCompressionTaskListMessages(messages){
-  const latest=[...(messages||[])].reverse().find(m=>_isPreservedCompressionTaskListMessage(m));
+  // Scan backward without copying the array — [...messages].reverse() allocates
+  // a full copy of all messages on every renderMessages() call.
+  const msgs=messages||[];
+  let latest=null;
+  for(let i=msgs.length-1;i>=0;i--){
+    if(_isPreservedCompressionTaskListMessage(msgs[i])){latest=msgs[i];break;}
+  }
   if(!latest) return [];
-  const latestTodos=_latestTodoToolItems(messages);
+  const latestTodos=_latestTodoToolItems(msgs);
   if(Array.isArray(latestTodos) && !_hasActiveTodoItems(latestTodos)) return [];
   return [latest];
 }
@@ -15869,8 +15937,17 @@ function renderMessages(options){
     rawIdx++;
   }
   const firstRenderedRawIdx=renderVisWithIdx.length?renderVisWithIdx[0].rawIdx:Infinity;
-  const assistantTurnFinalVisibleContentByRawIdx=_assistantTurnFinalVisibleContentMap(visWithIdx);
-  const assistantTurnVisibleContentByRawIdx=_assistantTurnVisibleContentMap(visWithIdx);
+  // P0 optimization: limit full-array scans to the assistant-run containing the
+  // render window start.  _assistantTurnFinalVisibleContentMap and
+  // _assistantTurnVisibleContentMap are only consulted for rawIdx values that
+  // appear in renderVisWithIdx, so scanning from the start of that run to the
+  // end of visWithIdx is sufficient.
+  const _visScanStart=renderVisWithIdx.length
+    ? _findRunStartForWindow(visWithIdx, virtualWindow.start)
+    : 0;
+  const visScanSlice=visWithIdx.slice(_visScanStart);
+  const assistantTurnFinalVisibleContentByRawIdx=_assistantTurnFinalVisibleContentMap(visScanSlice);
+  const assistantTurnVisibleContentByRawIdx=_assistantTurnVisibleContentMap(visScanSlice);
   const hasServerOlder=!!(typeof _messagesTruncated!=='undefined' && _messagesTruncated && S.messages.length>0);
   const serverOlderCount=hasServerOlder&&Number.isFinite(Number(_oldestIdx))?Math.max(0,Number(_oldestIdx)):0;
   if(typeof _applySessionNavigationPrefs==='function') _applySessionNavigationPrefs();
@@ -15928,11 +16005,24 @@ function renderMessages(options){
   const questionRawIdxByAssistantRawIdx=new Map();
   let lastQuestionRawIdx=-1;
   const renderedRawIdxs=new Set(renderVisWithIdx.map(e=>e.rawIdx));
-  const renderableRawIdxs=new Set(visWithIdx.map(e=>e.rawIdx));
-  for(const entry of visWithIdx){
+  // O(1) renderable-range check replaces visWithIdx.map(e=>e.rawIdx) + Set —
+  // rawIdx in visWithIdx is monotonically increasing, so a range check is
+  // sufficient for the virtualized skip-guard below.
+  const visRawMin=visWithIdx.length?visWithIdx[0].rawIdx:Infinity;
+  const visRawMax=visWithIdx.length?visWithIdx[visWithIdx.length-1].rawIdx:-1;
+  const _isRenderableRawIdx=(idx)=>idx>=visRawMin&&idx<=visRawMax;
+  // P0 optimization: find the last user message before the window start,
+  // then only scan the render window for assistants.
+  if(_visScanStart>0){
+    for(let i=_visScanStart-1;i>=0;i--){
+      const m=visWithIdx[i]&&visWithIdx[i].m;
+      if(m&&m.role==='user'){lastQuestionRawIdx=visWithIdx[i].rawIdx;break;}
+    }
+  }
+  for(const entry of renderVisWithIdx){
     const role=entry&&entry.m&&entry.m.role;
     if(role==='user') lastQuestionRawIdx=entry.rawIdx;
-    else if(role==='assistant'&&renderedRawIdxs.has(entry.rawIdx)) questionRawIdxByAssistantRawIdx.set(entry.rawIdx,lastQuestionRawIdx);
+    else if(role==='assistant') questionRawIdxByAssistantRawIdx.set(entry.rawIdx,lastQuestionRawIdx);
   }
   const assistantRawIdxByQuestionRawIdx=new Map();
   for(const [aIdx,qIdx] of questionRawIdxByAssistantRawIdx){
@@ -16761,7 +16851,7 @@ function renderMessages(options){
       if(tid&&transparentOrderedToolIds.has(tid)) continue;
       const aIdx=tc.assistant_msg_idx!==undefined?parseInt(tc.assistant_msg_idx):-1;
       if(anchorOwnedAssistantRawIdxs.has(aIdx)) continue;
-      if(virtualWindow.virtualized&&renderableRawIdxs.has(aIdx)&&!renderedRawIdxs.has(aIdx)) continue;
+      if(virtualWindow.virtualized&&_isRenderableRawIdx(aIdx)&&!renderedRawIdxs.has(aIdx)) continue;
       const segmentSeq=normalizeToken(tc.activitySegmentSeq);
       const burstId=normalizeToken(tc.activityBurstId);
       const burstResolvable=burstId&&knownBurstIds.has(burstId);
@@ -16772,7 +16862,7 @@ function renderMessages(options){
     }
     for(const aIdx of assistantThinking.keys()){
       if(anchorOwnedAssistantRawIdxs.has(aIdx)) continue;
-      if(virtualWindow.virtualized&&renderableRawIdxs.has(aIdx)&&!renderedRawIdxs.has(aIdx)) continue;
+      if(virtualWindow.virtualized&&_isRenderableRawIdx(aIdx)&&!renderedRawIdxs.has(aIdx)) continue;
       const seg=assistantSegments.get(aIdx);
       const segmentSeq=seg&&seg.getAttribute('data-live-segment-seq')||'';
       const burstId=seg&&seg.getAttribute('data-activity-burst-id')||'';
@@ -16783,7 +16873,7 @@ function renderMessages(options){
     for(const [aIdx,seg] of assistantSegments){
       if(anchorOwnedAssistantRawIdxs.has(aIdx)) continue;
       if(!seg||!seg.classList||!seg.classList.contains('assistant-segment-worklog-source')) continue;
-      if(virtualWindow.virtualized&&renderableRawIdxs.has(aIdx)&&!renderedRawIdxs.has(aIdx)) continue;
+      if(virtualWindow.virtualized&&_isRenderableRawIdx(aIdx)&&!renderedRawIdxs.has(aIdx)) continue;
       if(!_worklogReasonHtmlFromAnchor(seg)) continue;
       const segmentSeq=seg&&seg.getAttribute('data-live-segment-seq')||'';
       const burstId=seg&&seg.getAttribute('data-activity-burst-id')||'';
