@@ -551,6 +551,8 @@ let _messageVirtualMeasurementRetryCount=0;
 let _messageVirtualScrollActive=false;
 let _messageVirtualScrollSettleTimer=0;
 let _messageVirtualDeferredMeasurement=null;
+// Delta-measurement: track already-measured rawIdxs so we only read DOM for new rows
+let _messageVirtualPrevMeasuredSet=new Set();
 let _msgNodeRecycleEnabled=false;
 const _recycleStash=new Map();
 const _recycleResetAttrs=[
@@ -592,6 +594,7 @@ function _clearMessageVirtualHeightCache(){
   _messageVirtualHeightCacheLen=0;
   _messageVirtualHeightCacheSrc=null;
   _messageVirtualEstimatedRowHeight=_messageVirtualDefaultHeightForRole('default');
+  _messageVirtualPrevMeasuredSet.clear();
   _messageVirtualWindowKey='';
   _messageVirtualMeasurementCycleKey='';
   _messageVirtualMeasurementRetryCount=0;
@@ -1425,14 +1428,24 @@ function _updateMessageVirtualMeasurements(renderVisWithIdx, renderVisibleIdxs, 
   let changed=false;
   let measuredCount=0;
   let measuredTotal=0;
+  const prevSet=_messageVirtualPrevMeasuredSet;
   for(let vi=0;vi<renderVisWithIdx.length;vi++){
     const entry=renderVisWithIdx[vi];
     if(!entry) continue;
-    const totalHeight=_measureMessageVirtualRow(inner, entry);
-    if(totalHeight<=0) continue;
     const visibleIdx=Number(renderVisibleIdxs&&renderVisibleIdxs[vi]);
     if(!Number.isFinite(visibleIdx)) continue;
-    if(Math.abs((Number(_messageVirtualHeightCache[visibleIdx])||0)-totalHeight)>1){
+    // Delta: skip DOM read for rows already measured in a prior cycle.
+    // Their cached height is still valid (content hasn't changed for settled rows,
+    // and streaming rows invalidate the cache via _clearMessageVirtualHeightCache).
+    let totalHeight;
+    if(prevSet.has(entry.rawIdx)){
+      totalHeight=Number(_messageVirtualHeightCache[visibleIdx])||0;
+    }else{
+      totalHeight=_measureMessageVirtualRow(inner, entry);
+      prevSet.add(entry.rawIdx);
+    }
+    if(totalHeight<=0) continue;
+    if(totalHeight>0 && Math.abs((Number(_messageVirtualHeightCache[visibleIdx])||0)-totalHeight)>1){
       _messageVirtualHeightCache[visibleIdx]=totalHeight;
       changed=true;
     }
