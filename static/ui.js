@@ -1292,6 +1292,11 @@ function _compensateScrollForMeasurementDelta(renderFn){
   const scrollTopBefore=container.scrollTop;
   container.classList.add('vscroll-measuring');
   try{ renderFn(); }finally{ container.classList.remove('vscroll-measuring'); }
+  // During active scroll, skip scrollTop compensation: it arms _programmaticScroll
+  // which blocks the next 80 ms of user scroll input → perceived as stutter +
+  // jump-back. After scroll settles, deferred measurement runs one clean render
+  // with compensation instead of a cascade during the scroll itself.
+  if(_messageVirtualScrollActive) return;
   if(!anchorBefore) return;
   if(scrollTopBefore<1){
     const spacer=container.querySelector('[data-virtual-spacer="before"]');
