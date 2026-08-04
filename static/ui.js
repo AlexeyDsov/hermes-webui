@@ -553,6 +553,7 @@ let _messageVirtualScrollSettleTimer=0;
 let _messageVirtualDeferredMeasurement=null;
 // Delta-measurement: track already-measured rawIdxs so we only read DOM for new rows
 let _messageVirtualPrevMeasuredSet=new Set();
+const MESSAGE_VIRTUAL_PREV_MEASURED_MAX=2000;
 // Binary search cache: prefix sums of heights for O(log N) window lookups
 let _messageVirtualPrefixSum=null;
 let _messageVirtualPrefixSumHeights=null;
@@ -1479,6 +1480,10 @@ function _updateMessageVirtualMeasurements(renderVisWithIdx, renderVisibleIdxs, 
     }else{
       totalHeight=_measureMessageVirtualRow(inner, entry);
       prevSet.add(entry.rawIdx);
+      // Evict the set when it grows too large — Set.has() on 10k+ entries
+      // adds measurable overhead per scroll cycle, and stale entries for
+      // rows scrolled out of view are useless noise.
+      if(prevSet.size>MESSAGE_VIRTUAL_PREV_MEASURED_MAX) prevSet.clear();
     }
     if(totalHeight<=0) continue;
     const oldHeight=Number(_messageVirtualHeightCache[visibleIdx])||0;
@@ -1670,7 +1675,10 @@ function _getCachedRender(text, isUser){
   const rendered = isUser
     ? (window._renderUserMarkdown ? renderMd(text) : _renderUserFencedBlocks(text))
     : renderMd(_stripXmlToolCallsDisplay(String(text)));
-  if(_renderCache.size > _renderCacheMax) _renderCache.clear();
+  // Evict oldest entries instead of clearing the entire cache — a full
+  // clear on every overflow causes all messages to re-render their markdown
+  // on the next renderMessages(), triggering GC pauses in long sessions.
+  while(_renderCache.size > _renderCacheMax) _renderCache.delete(_renderCache.keys().next().value);
   _renderCache.set(key, rendered);
   return rendered;
 }
