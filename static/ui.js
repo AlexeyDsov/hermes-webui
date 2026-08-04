@@ -1463,8 +1463,6 @@ function _updateMessageVirtualMeasurements(renderVisWithIdx, renderVisibleIdxs, 
   let changed=false;
   let measuredCount=0;
   let measuredTotal=0;
-  // Track changed indices for incremental prefix-sum update (avoids O(N) rebuild).
-  let changedIndices=null;
   const prevSet=_messageVirtualPrevMeasuredSet;
   for(let vi=0;vi<renderVisWithIdx.length;vi++){
     const entry=renderVisWithIdx[vi];
@@ -1490,9 +1488,6 @@ function _updateMessageVirtualMeasurements(renderVisWithIdx, renderVisibleIdxs, 
     if(Math.abs(oldHeight-totalHeight)>1){
       _messageVirtualHeightCache[visibleIdx]=totalHeight;
       changed=true;
-      // Record the change for incremental prefix-sum update.
-      if(changedIndices===null) changedIndices=new Map();
-      changedIndices.set(visibleIdx,{delta:totalHeight-oldHeight,height:totalHeight});
     }
     measuredTotal+=totalHeight;
     measuredCount++;
@@ -1501,52 +1496,26 @@ function _updateMessageVirtualMeasurements(renderVisWithIdx, renderVisibleIdxs, 
     _messageVirtualEstimatedRowHeight=Math.max(60, Math.round(measuredTotal/measuredCount));
   }
   if(changed){
-    // Incrementally update prefix-sum instead of rebuilding from scratch.
-    // When heights change in-place, we apply deltas to the affected suffix
-    // of the prefix-sum array — O(N*K) where K is typically 1-5 changed rows
-    // per measurement cycle, vs O(N) full rebuild on every scroll event.
-    let prefixSum=_messageVirtualPrefixSum;
+    // After measurements change heights in-place, rebuild prefix-sum from
+    // the authoritative source (_messageVirtualHeightCache) to guarantee
+    // consistency.  When MAX_RERENDERS caps the measurement loop, some rows
+    // remain unmeasured and any delta-chain diverges from reality, causing
+    // cumulative scroll-position drift.  A single O(N) rebuild here is the
+    // only path that guarantees prefixSum matches heights exactly.
     const heights=_messageVirtualHeightCache;
     const tailStart=virtualWindow.tailStart||0;
     const expectedLen=tailStart+1;
-    const needFullRebuild=
-      prefixSum===null||
-      _messageVirtualPrefixSumHeights!==heights||
-      prefixSum.length!==expectedLen;
-    if(needFullRebuild){
-      prefixSum=new Float64Array(expectedLen);
-      let acc=0;
-      for(let i=0;i<tailStart;i++){
-        acc+=(Number(heights[i])>0)?heights[i]:_messageVirtualDefaultHeightForRole(_messageVirtualRoleForEntry(_getVisibleMessagesWithIdx()[i]));
-        prefixSum[i+1]=acc;
-      }
-      _messageVirtualPrefixSum=prefixSum;
-      _messageVirtualPrefixSumHeights=heights;
-      _messageVirtualPrefixSumLen=tailStart;
-    }else if(changedIndices&&changedIndices.size>0){
-      // Apply deltas incrementally: sort indices, accumulate running delta,
-      // sweep the suffix for each changed index.
-      const sortedIdxs=Array.from(changedIndices.keys()).sort((a,b)=>a-b);
-      // If too many changes, full rebuild is cheaper.
-      if(sortedIdxs.length<Math.max(4, tailStart*0.2)){
-        let runningDelta=0;
-        let ci=0;
-        for(let i=0;i<expectedLen;i++){
-          while(ci<sortedIdxs.length&&sortedIdxs[ci]<i){
-            runningDelta+=changedIndices.get(sortedIdxs[ci]).delta;
-            ci++;
-          }
-          prefixSum[i]+=runningDelta;
-        }
-      }else{
-        // Full rebuild when changes are widespread.
-        let acc=0;
-        for(let i=0;i<tailStart;i++){
-          acc+=(Number(heights[i])>0)?heights[i]:_messageVirtualDefaultHeightForRole(_messageVirtualRoleForEntry(_getVisibleMessagesWithIdx()[i]));
-          prefixSum[i+1]=acc;
-        }
-      }
+    const visWithIdx=_getVisibleMessagesWithIdx();
+    const prefixSum=new Float64Array(expectedLen);
+    let acc=0;
+    for(let i=0;i<tailStart;i++){
+      const h=Number(heights[i]);
+      acc+=(h>0)?h:_messageVirtualDefaultHeightForRole(_messageVirtualRoleForEntry(visWithIdx[i]));
+      prefixSum[i+1]=acc;
     }
+    _messageVirtualPrefixSum=prefixSum;
+    _messageVirtualPrefixSumHeights=heights;
+    _messageVirtualPrefixSumLen=tailStart;
     _scheduleMessageVirtualMeasurementRefresh(virtualWindow);
   }else{
     _markMessageVirtualMeasurementsSettled(virtualWindow);
