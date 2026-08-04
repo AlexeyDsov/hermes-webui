@@ -1625,7 +1625,7 @@ function _scheduleMessageVirtualizedRender(force){
 // Cache the rendered HTML so unchanged messages skip the expensive regex
 // pipeline entirely.  ~95% of messages are identical between renders.
 const _renderCache = new Map();
-const _renderCacheMax = 300;
+const _renderCacheMax = 10000;
 function _clearRenderCache(){ _renderCache.clear(); }
 function _renderCacheKey(text, isUser){
   // Fold render_user_markdown state into user-message keys so toggling the
@@ -15858,6 +15858,8 @@ function renderMessages(options){
     ? visWithIdx.slice(renderTailStart)
     : [];
   const renderVisWithIdx=renderHeadVisWithIdx.concat(renderTailVisWithIdx);
+  // Lifted from line ~16083 so selective removal below can use it before the wipe point.
+  const renderedRawIdxs=new Set(renderVisWithIdx.map(e=>e.rawIdx));
   const renderVisibleIdxs=[
     ...renderHeadVisWithIdx.map((_,idx)=>windowStart+idx),
     ...renderTailVisWithIdx.map((_,idx)=>renderTailStart+idx),
@@ -15950,15 +15952,6 @@ function renderMessages(options){
     S.session && typeof S.session.compression_anchor_summary==='string'
   ) ? S.session.compression_anchor_summary.trim() : '';
   const worklogDetailDisclosureState=_captureWorklogDetailDisclosureState(inner);
-  _recycleStash.clear();
-  if(_msgNodeRecycleEnabled){
-    for(const child of Array.from(inner.children)){
-      const key=child.dataset&&(child.dataset.recycleKey||child.dataset.msgIdx);
-      if(!key) continue;
-      if(child.id==='liveAssistantTurn'||child.querySelector&&child.querySelector('#liveAssistantTurn')) continue;
-      _recycleStash.set(Number(key), child);
-    }
-  }
   // Mobile scroll-jank fix: temporarily disable overflow-anchor so Chromium
   // cannot re-anchor to the topmost row during the DOM wipe-and-rebuild gap.
   if(window._fixMobileScrollJank) window._fixMobileScrollJank();
@@ -15992,7 +15985,27 @@ function renderMessages(options){
   // the live reply stops following / appears to jump backward.
   _programmaticScroll=true;
   _programmaticScrollSetAt=performance.now();
-  inner.innerHTML='';
+  // P0: selective removal instead of innerHTML='' — avoids forced synchronous
+  // layout flush (which triggers 200+ Layout events in the trace).  Detach
+  // each child individually and stash for recycling; the rebuild loop below
+  // re-appends stashed nodes instead of allocating new ones.  This path is
+  // always active (not gated by _msgNodeRecycleEnabled) because even non-
+  // virtualized renders benefit from avoiding the innerHTML wipe.
+  _recycleStash.clear();
+  {
+    const toRemove=Array.from(inner.children);
+    for(const child of toRemove){
+      // Preserve the live assistant turn node — the smd parser holds a live
+      // reference into it; detaching it breaks mid-stream rendering.
+      if(child.id==='liveAssistantTurn') continue;
+      if(child.querySelector&&child.querySelector('#liveAssistantTurn')) continue;
+      const key=child.dataset&&(child.dataset.recycleKey||child.dataset.msgIdx);
+      if(key!==undefined&&key!==null){
+        _recycleStash.set(Number(key), child);
+      }
+      inner.removeChild(child);
+    }
+  }
   const compressionNode=compressionState?_compressionCardsNode(compressionState):null;
   const {message:referenceMessage, rawIdx:referenceMessageRawIdx}=_latestCompressionReferenceMessage(
     S.messages,
@@ -16080,7 +16093,6 @@ function renderMessages(options){
   // assistant messages that appear in the current render window anyway.
   const questionRawIdxByAssistantRawIdx=new Map();
   let lastQuestionRawIdx=-1;
-  const renderedRawIdxs=new Set(renderVisWithIdx.map(e=>e.rawIdx));
   // O(1) renderable-range check replaces visWithIdx.map(e=>e.rawIdx) + Set —
   // rawIdx in visWithIdx is monotonically increasing, so a range check is
   // sufficient for the virtualized skip-guard below.
@@ -16358,7 +16370,7 @@ function renderMessages(options){
 
     if(isProcessWakeup){
       currentAssistantTurn=null;
-      let row=_msgNodeRecycleEnabled?_recycleStash.get(rawIdx):null;
+      let row=_recycleStash.get(rawIdx);
       if(row&&(!row.classList.contains('msg-row')||row.classList.contains('assistant-turn'))) row=null;
       const processText=String(rowDisplayContent||'').trim();
       const processFootHtml=`<div class="msg-foot">${timeHtml}<span class="msg-actions">${copyBtn}</span></div>`;
