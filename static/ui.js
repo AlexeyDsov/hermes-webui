@@ -1462,6 +1462,8 @@ function _updateMessageVirtualMeasurements(renderVisWithIdx, renderVisibleIdxs, 
   let changed=false;
   let measuredCount=0;
   let measuredTotal=0;
+  // Track changed indices for incremental prefix-sum update (avoids O(N) rebuild).
+  let changedIndices=null;
   const prevSet=_messageVirtualPrevMeasuredSet;
   for(let vi=0;vi<renderVisWithIdx.length;vi++){
     const entry=renderVisWithIdx[vi];
@@ -1479,9 +1481,13 @@ function _updateMessageVirtualMeasurements(renderVisWithIdx, renderVisibleIdxs, 
       prevSet.add(entry.rawIdx);
     }
     if(totalHeight<=0) continue;
-    if(totalHeight>0 && Math.abs((Number(_messageVirtualHeightCache[visibleIdx])||0)-totalHeight)>1){
+    const oldHeight=Number(_messageVirtualHeightCache[visibleIdx])||0;
+    if(Math.abs(oldHeight-totalHeight)>1){
       _messageVirtualHeightCache[visibleIdx]=totalHeight;
       changed=true;
+      // Record the change for incremental prefix-sum update.
+      if(changedIndices===null) changedIndices=new Map();
+      changedIndices.set(visibleIdx,{delta:totalHeight-oldHeight,height:totalHeight});
     }
     measuredTotal+=totalHeight;
     measuredCount++;
@@ -1490,12 +1496,52 @@ function _updateMessageVirtualMeasurements(renderVisWithIdx, renderVisibleIdxs, 
     _messageVirtualEstimatedRowHeight=Math.max(60, Math.round(measuredTotal/measuredCount));
   }
   if(changed){
-    // Heights changed in-place — invalidate prefix-sum cache so the next
-    // window calculation rebuilds it from the updated heights instead of
-    // using stale prefix sums that cause incorrect window offsets and
-    // scroll-jump-back artifacts.
-    _messageVirtualPrefixSum=null;
-    _messageVirtualPrefixSumHeights=null;
+    // Incrementally update prefix-sum instead of rebuilding from scratch.
+    // When heights change in-place, we apply deltas to the affected suffix
+    // of the prefix-sum array — O(N*K) where K is typically 1-5 changed rows
+    // per measurement cycle, vs O(N) full rebuild on every scroll event.
+    let prefixSum=_messageVirtualPrefixSum;
+    const heights=_messageVirtualHeightCache;
+    const tailStart=virtualWindow.tailStart||0;
+    const expectedLen=tailStart+1;
+    const needFullRebuild=
+      prefixSum===null||
+      _messageVirtualPrefixSumHeights!==heights||
+      prefixSum.length!==expectedLen;
+    if(needFullRebuild){
+      prefixSum=new Float64Array(expectedLen);
+      let acc=0;
+      for(let i=0;i<tailStart;i++){
+        acc+=(Number(heights[i])>0)?heights[i]:_messageVirtualDefaultHeightForRole(_messageVirtualRoleForEntry(_getVisibleMessagesWithIdx()[i]));
+        prefixSum[i+1]=acc;
+      }
+      _messageVirtualPrefixSum=prefixSum;
+      _messageVirtualPrefixSumHeights=heights;
+      _messageVirtualPrefixSumLen=tailStart;
+    }else if(changedIndices&&changedIndices.size>0){
+      // Apply deltas incrementally: sort indices, accumulate running delta,
+      // sweep the suffix for each changed index.
+      const sortedIdxs=Array.from(changedIndices.keys()).sort((a,b)=>a-b);
+      // If too many changes, full rebuild is cheaper.
+      if(sortedIdxs.length<Math.max(4, tailStart*0.2)){
+        let runningDelta=0;
+        let ci=0;
+        for(let i=0;i<expectedLen;i++){
+          while(ci<sortedIdxs.length&&sortedIdxs[ci]<i){
+            runningDelta+=changedIndices.get(sortedIdxs[ci]).delta;
+            ci++;
+          }
+          prefixSum[i]+=runningDelta;
+        }
+      }else{
+        // Full rebuild when changes are widespread.
+        let acc=0;
+        for(let i=0;i<tailStart;i++){
+          acc+=(Number(heights[i])>0)?heights[i]:_messageVirtualDefaultHeightForRole(_messageVirtualRoleForEntry(_getVisibleMessagesWithIdx()[i]));
+          prefixSum[i+1]=acc;
+        }
+      }
+    }
     _scheduleMessageVirtualMeasurementRefresh(virtualWindow);
   }else{
     _markMessageVirtualMeasurementsSettled(virtualWindow);
