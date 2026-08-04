@@ -553,6 +553,10 @@ let _messageVirtualScrollSettleTimer=0;
 let _messageVirtualDeferredMeasurement=null;
 // Delta-measurement: track already-measured rawIdxs so we only read DOM for new rows
 let _messageVirtualPrevMeasuredSet=new Set();
+// Binary search cache: prefix sums of heights for O(log N) window lookups
+let _messageVirtualPrefixSum=null;
+let _messageVirtualPrefixSumHeights=null;
+let _messageVirtualPrefixSumLen=0;
 let _msgNodeRecycleEnabled=false;
 const _recycleStash=new Map();
 const _recycleResetAttrs=[
@@ -594,7 +598,11 @@ function _clearMessageVirtualHeightCache(){
   _messageVirtualHeightCacheLen=0;
   _messageVirtualHeightCacheSrc=null;
   _messageVirtualEstimatedRowHeight=_messageVirtualDefaultHeightForRole('default');
-  _messageVirtualPrevMeasuredSet.clear();
+  if(typeof _messageVirtualPrevMeasuredSet!=='undefined') _messageVirtualPrevMeasuredSet.clear();
+  // Invalidate prefix-sum cache when heights are cleared
+  _messageVirtualPrefixSum=null;
+  _messageVirtualPrefixSumHeights=null;
+  _messageVirtualPrefixSumLen=0;
   _messageVirtualWindowKey='';
   _messageVirtualMeasurementCycleKey='';
   _messageVirtualMeasurementRetryCount=0;
@@ -711,27 +719,48 @@ function _messageVirtualWindow(opts){
   if(total<=Math.max(threshold, keepTailCount)){
     return {virtualized:false,start:0,end:total,topPad:0,bottomPad:0,total,tailStart};
   }
+  // Build or reuse prefix-sum cache for O(log N) binary search.
+  // Heights are stable during scroll, so caching by reference avoids rebuilding.
+  // Defensive init for test harnesses that eval this function in isolation.
+  if(typeof _messageVirtualPrefixSum==='undefined') _messageVirtualPrefixSum=null;
+  if(typeof _messageVirtualPrefixSumHeights==='undefined') _messageVirtualPrefixSumHeights=null;
+  if(typeof _messageVirtualPrefixSumLen==='undefined') _messageVirtualPrefixSumLen=0;
+  let prefixSum=_messageVirtualPrefixSum;
+  if(prefixSum===null||_messageVirtualPrefixSumHeights!==heights||_messageVirtualPrefixSumLen!==tailStart){
+    prefixSum=new Float64Array(tailStart+1);
+    let acc=0;
+    for(let i=0;i<tailStart;i++){
+      acc+=rowHeightFor(i);
+      prefixSum[i+1]=acc;
+    }
+    _messageVirtualPrefixSum=prefixSum;
+    _messageVirtualPrefixSumHeights=heights;
+    _messageVirtualPrefixSumLen=tailStart;
+  }
   const scrollTop=Math.max(0, Number(opts&&opts.scrollTop)||0);
   const targetTop=Math.max(0, scrollTop-bufferPx);
   const targetBottom=scrollTop+viewportHeight+bufferPx;
-  let start=0;
-  let offset=0;
-  while(start<tailStart&&offset+rowHeightFor(start)<=targetTop){
-    offset+=rowHeightFor(start);
-    start++;
+  // Binary search: find last index where prefixSum[start] <= targetTop
+  // prefixSum has tailStart+1 entries (0..tailStart), so search full range
+  let lo=0, hi=tailStart, start=0;
+  while(lo<=hi){
+    const mid=(lo+hi)>>>1;
+    if(prefixSum[mid]<=targetTop){start=mid;lo=mid+1;}
+    else hi=mid-1;
   }
   if(start>=tailStart){
-    return {virtualized:true,start:tailStart,end:tailStart,topPad:offset,bottomPad:0,total,tailStart};
+    return {virtualized:true,start:tailStart,end:tailStart,topPad:prefixSum[tailStart],bottomPad:0,total,tailStart};
   }
-  let end=start;
-  let cursor=offset;
-  while(end<tailStart&&cursor<targetBottom){
-    cursor+=rowHeightFor(end);
-    end++;
+  // Binary search: find first index where prefixSum[end] >= targetBottom
+  lo=start+1; hi=tailStart-1; let end=tailStart;
+  while(lo<=hi){
+    const mid=(lo+hi)>>>1;
+    if(prefixSum[mid]>=targetBottom){end=mid;hi=mid-1;}
+    else lo=mid+1;
   }
-  if(end<=start) end=Math.min(total, start+1);
-  let bottomPad=0;
-  for(let i=end;i<tailStart;i++) bottomPad+=rowHeightFor(i);
+  if(end<=start) end=start+1;
+  const offset=prefixSum[start];
+  const bottomPad=prefixSum[tailStart]-prefixSum[end];
   return {
     virtualized:true,
     start,
