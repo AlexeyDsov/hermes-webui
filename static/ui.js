@@ -1485,6 +1485,12 @@ function _updateMessageVirtualMeasurements(renderVisWithIdx, renderVisibleIdxs, 
     _messageVirtualEstimatedRowHeight=Math.max(60, Math.round(measuredTotal/measuredCount));
   }
   if(changed){
+    // Heights changed in-place — invalidate prefix-sum cache so the next
+    // window calculation rebuilds it from the updated heights instead of
+    // using stale prefix sums that cause incorrect window offsets and
+    // scroll-jump-back artifacts.
+    _messageVirtualPrefixSum=null;
+    _messageVirtualPrefixSumHeights=null;
     _scheduleMessageVirtualMeasurementRefresh(virtualWindow);
   }else{
     _markMessageVirtualMeasurementsSettled(virtualWindow);
