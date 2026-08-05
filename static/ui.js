@@ -16005,8 +16005,11 @@ function renderMessages(options){
         break;
       }
     }
-    // Stash all children (including liveNode) before atomic wipe.
+    // Stash all children EXCEPT the live node (it stays in memory via
+    // liveNode / _preservedLiveTurn — stashing it would let the rebuild
+    // loop grab the stale parser-owned node instead of creating a fresh one).
     for(const child of inner.children){
+      if(child===liveNode) continue;
       const key=child.dataset&&(child.dataset.recycleKey||child.dataset.msgIdx);
       if(key!==undefined&&key!==null){
         _recycleStash.set(Number(key), child);
@@ -16014,8 +16017,14 @@ function renderMessages(options){
     }
     // Atomic wipe — no intermediate DOM states for overflow-anchor to grab.
     inner.innerHTML='';
-    // Re-append the live node so the smd parser reference stays valid.
-    if(liveNode) inner.appendChild(liveNode);
+    // Do NOT re-append liveNode here. The rebuild loop below creates a fresh
+    // #liveAssistantTurn. If _preservedLiveTurn was captured, its post-rebuild
+    // restore logic swaps the rebuilt turn with the parser-owned one.
+    // If _preservedLiveTurn was NOT captured (e.g. session switch, no active
+    // stream), the fresh rebuilt turn is correct — the smd parser will
+    // reconnect via messages.js on the next stream event.
+    // Re-appending liveNode unconditionally would create a duplicate
+    // #liveAssistantTurn, and the smd parser writes into the wrong one.
   }
   const compressionNode=compressionState?_compressionCardsNode(compressionState):null;
   const {message:referenceMessage, rawIdx:referenceMessageRawIdx}=_latestCompressionReferenceMessage(
