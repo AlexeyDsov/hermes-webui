@@ -885,6 +885,7 @@ function $(id){ return id === 'messages' ? container : null; }
 function _captureMessageViewportAnchor(){ return null; }
 let _programmaticScroll = false;
 let _lastScrollTop = 0;
+let _messageVirtualScrollActive = false;
 function _scheduleMessageVirtualizedRender(){ renderCalls.push(true); }
 function requestAnimationFrame(cb){ cb(); }
 eval(extractFunc('_compensateScrollForMeasurementDelta'));
@@ -937,6 +938,7 @@ function _deferClearProgrammaticScroll(ms){clearTimeout(_programmaticScrollReset
 let renderCalls = [];
 function _scheduleMessageVirtualizedRender(){ renderCalls.push(true); }
 function requestAnimationFrame(cb){ cb(); }
+let _messageVirtualScrollActive = false;
 eval(extractFunc('_compensateScrollForMeasurementDelta'));
 _compensateScrollForMeasurementDelta(()=>{ _scheduleMessageVirtualizedRender(true); });
 console.log(JSON.stringify({
@@ -989,6 +991,7 @@ function _deferClearProgrammaticScroll(ms){clearTimeout(_programmaticScrollReset
 let renderCalls = [];
 function _scheduleMessageVirtualizedRender(){ renderCalls.push(true); }
 function requestAnimationFrame(cb){ cb(); }
+let _messageVirtualScrollActive = false;
 eval(extractFunc('_compensateScrollForMeasurementDelta'));
 _compensateScrollForMeasurementDelta(()=>{ _scheduleMessageVirtualizedRender(true); });
 console.log(JSON.stringify({
@@ -1041,6 +1044,7 @@ function _scheduleMessageVirtualizedRender(){ renderCalls.push(true); }
 function _deferClearProgrammaticScroll(ms){clearTimeout(_programmaticScrollResetTimer);_programmaticScrollResetTimer=setTimeout(()=>{_programmaticScroll=false;},ms||80);}
 function requestAnimationFrame(cb){ cb(); }
 function setTimeout(cb, delay){ cb(); return 1; }
+let _messageVirtualScrollActive = false;
 eval(extractFunc('_compensateScrollForMeasurementDelta'));
 _compensateScrollForMeasurementDelta(()=>{ _scheduleMessageVirtualizedRender(true); });
 console.log(JSON.stringify({
