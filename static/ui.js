@@ -620,6 +620,7 @@ function _resetMessageRenderWindow(sid){
   _clearRenderCache();
   clearVisibleMessageRowCache();
   _clearMessageVirtualHeightCache();
+  _recycleStash.clear();
 }
 function _cancelMessageVirtualizedRender(){
   if(_messageVirtualScrollRaf){
@@ -15991,29 +15992,31 @@ function renderMessages(options){
   // re-appends stashed nodes instead of allocating new ones.  This path is
   // always active (not gated by _msgNodeRecycleEnabled) because even non-
   // virtualized renders benefit from avoiding the innerHTML wipe.
-  // With removeChild (unlike atomic innerHTML=''), the browser's overflow-anchor
-  // fires on each intermediate DOM state and can grab different elements mid-loop,
-  // causing scrollTop drift. Suppress it for the wipe cycle on all platforms.
-  const _messagesEl=$('messages');
-  const _prevOverflowAnchor=_messagesEl?_messagesEl.style.overflowAnchor:'';
-  if(_messagesEl) _messagesEl.style.overflowAnchor='none';
+  // Stash children for recycling BEFORE the wipe, then use innerHTML='' for
+  // an atomic clear that doesn't trigger intermediate overflow-anchor events.
   _recycleStash.clear();
   {
-    const toRemove=Array.from(inner.children);
-    for(const child of toRemove){
-      // Preserve the live assistant turn node — the smd parser holds a live
-      // reference into it; detaching it breaks mid-stream rendering.
-      if(child.id==='liveAssistantTurn') continue;
-      if(child.querySelector&&child.querySelector('#liveAssistantTurn')) continue;
+    // Preserve the live assistant turn node — the smd parser holds a live
+    // reference into it; detaching it breaks mid-stream rendering.
+    let liveNode=null;
+    for(const child of inner.children){
+      if(child.id==='liveAssistantTurn'||(child.querySelector&&child.querySelector('#liveAssistantTurn'))){
+        liveNode=child;
+        break;
+      }
+    }
+    // Stash all children (including liveNode) before atomic wipe.
+    for(const child of inner.children){
       const key=child.dataset&&(child.dataset.recycleKey||child.dataset.msgIdx);
       if(key!==undefined&&key!==null){
         _recycleStash.set(Number(key), child);
       }
-      inner.removeChild(child);
     }
+    // Atomic wipe — no intermediate DOM states for overflow-anchor to grab.
+    inner.innerHTML='';
+    // Re-append the live node so the smd parser reference stays valid.
+    if(liveNode) inner.appendChild(liveNode);
   }
-  // Restore overflow-anchor immediately after wipe so live streaming re-anchors correctly.
-  if(_messagesEl) _messagesEl.style.overflowAnchor=_prevOverflowAnchor;
   const compressionNode=compressionState?_compressionCardsNode(compressionState):null;
   const {message:referenceMessage, rawIdx:referenceMessageRawIdx}=_latestCompressionReferenceMessage(
     S.messages,
