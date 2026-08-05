@@ -558,7 +558,6 @@ const MESSAGE_VIRTUAL_PREV_MEASURED_MAX=2000;
 let _messageVirtualPrefixSum=null;
 let _messageVirtualPrefixSumHeights=null;
 let _messageVirtualPrefixSumLen=0;
-let _msgNodeRecycleEnabled=false;
 const _recycleStash=new Map();
 const _recycleResetAttrs=[
   'data-transparent-turn-collapsed',
@@ -1613,11 +1612,7 @@ function _scheduleMessageVirtualizedRender(force){
       _messageVirtualWindowKey=liveKey;
       return;
     }
-    _msgNodeRecycleEnabled=true;
-    try{
-      _compensateScrollForMeasurementDelta(()=>{ renderMessages({ preserveScroll:true }); });
-    }
-    finally{ _msgNodeRecycleEnabled=false; }
+    _compensateScrollForMeasurementDelta(()=>{ renderMessages({ preserveScroll:true }); });
   });
 }
 
@@ -15990,7 +15985,7 @@ function renderMessages(options){
   // layout flush (which triggers 200+ Layout events in the trace).  Detach
   // each child individually and stash for recycling; the rebuild loop below
   // re-appends stashed nodes instead of allocating new ones.  This path is
-  // always active (not gated by _msgNodeRecycleEnabled) because even non-
+  // always active because even non-
   // virtualized renders benefit from avoiding the innerHTML wipe.
   // Stash children for recycling BEFORE the wipe, then use innerHTML='' for
   // an atomic clear that doesn't trigger intermediate overflow-anchor events.
