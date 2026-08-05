@@ -551,6 +551,13 @@ let _messageVirtualMeasurementRetryCount=0;
 let _messageVirtualScrollActive=false;
 let _messageVirtualScrollSettleTimer=0;
 let _messageVirtualDeferredMeasurement=null;
+// Delta-measurement: track already-measured rawIdxs so we only read DOM for new rows
+let _messageVirtualPrevMeasuredSet=new Set();
+const MESSAGE_VIRTUAL_PREV_MEASURED_MAX=2000;
+// Binary search cache: prefix sums of heights for O(log N) window lookups
+let _messageVirtualPrefixSum=null;
+let _messageVirtualPrefixSumHeights=null;
+let _messageVirtualPrefixSumLen=0;
 let _msgNodeRecycleEnabled=false;
 const _recycleStash=new Map();
 const _recycleResetAttrs=[
@@ -592,6 +599,11 @@ function _clearMessageVirtualHeightCache(){
   _messageVirtualHeightCacheLen=0;
   _messageVirtualHeightCacheSrc=null;
   _messageVirtualEstimatedRowHeight=_messageVirtualDefaultHeightForRole('default');
+  if(typeof _messageVirtualPrevMeasuredSet!=='undefined') _messageVirtualPrevMeasuredSet.clear();
+  // Invalidate prefix-sum cache when heights are cleared
+  _messageVirtualPrefixSum=null;
+  _messageVirtualPrefixSumHeights=null;
+  _messageVirtualPrefixSumLen=0;
   _messageVirtualWindowKey='';
   _messageVirtualMeasurementCycleKey='';
   _messageVirtualMeasurementRetryCount=0;
@@ -628,18 +640,67 @@ function _messageIsRenderable(m){
   return !!(msgContent(m)||m._statusCard||m.attachments?.length||(m.role==='assistant'&&(hasReasoningAnchor||hasAssistantVisibleAnchor)));
 }
 function _getVisibleMessagesWithIdx(){
-  if(!_visWithIdxCache || _visWithIdxCacheLen !== S.messages.length || _visWithIdxCacheSrc !== S.messages){
-    const rebuilt=[];
-    let rawIdx=0;
-    for(const m of (S.messages||[])){
-      if(_messageIsRenderable(m)) rebuilt.push({m,rawIdx});
-      rawIdx++;
-    }
-    _visWithIdxCache=rebuilt;
-    _visWithIdxCacheLen=S.messages.length;
-    _visWithIdxCacheSrc=S.messages;
+  const msgs=S.messages||[];
+  const len=msgs.length;
+
+  // Fast path: cache is still valid (same reference, same length).
+  if(_visWithIdxCache && _visWithIdxCacheLen===len && _visWithIdxCacheSrc===msgs){
+    return _visWithIdxCache;
   }
+
+  // Incremental append: if the new array starts with the same elements
+  // as the previous source and is same-or-longer, only process the tail.
+  // This covers [...S.messages, newMsg], _mergeInflightTailMessages, and
+  // any other append-only replacement without re-scanning the prefix.
+  if(_visWithIdxCache && _visWithIdxCacheSrc && len>=_visWithIdxCacheLen && _visWithIdxCacheLen>0){
+    const oldSrc=_visWithIdxCacheSrc;
+    const oldLen=_visWithIdxCacheLen;
+    let prefixMatch=true;
+    for(let i=0;i<oldLen;i++){
+      if(msgs[i]!==oldSrc[i]){
+        prefixMatch=false;
+        break;
+      }
+    }
+    if(prefixMatch){
+      const appended=[..._visWithIdxCache];
+      let rawIdx=oldLen;
+      for(let i=oldLen;i<len;i++){
+        const m=msgs[i];
+        if(_messageIsRenderable(m)) appended.push({m,rawIdx});
+        rawIdx++;
+      }
+      _visWithIdxCache=appended;
+      _visWithIdxCacheLen=len;
+      _visWithIdxCacheSrc=msgs;
+      return _visWithIdxCache;
+    }
+  }
+
+  // Full rebuild (wholesale replace, prepend, shrink, or first call).
+  const rebuilt=[];
+  let rawIdx=0;
+  for(const m of msgs){
+    if(_messageIsRenderable(m)) rebuilt.push({m,rawIdx});
+    rawIdx++;
+  }
+  _visWithIdxCache=rebuilt;
+  _visWithIdxCacheLen=len;
+  _visWithIdxCacheSrc=msgs;
   return _visWithIdxCache;
+}
+// Find the start index in visWithIdx of the assistant-run that contains
+// visWithIdx[windowStart].  Scans backward from windowStart to the nearest
+// non-assistant message (or index 0) so the caller can limit full-array
+// iterations to just the relevant run.
+function _findRunStartForWindow(visWithIdx, windowStart){
+  let i=windowStart;
+  while(i>0){
+    const m=visWithIdx[i-1]&&visWithIdx[i-1].m;
+    if(m&&m.role==='assistant') i--;
+    else break;
+  }
+  return i;
 }
 function _messageVirtualWindow(opts){
   const total=Math.max(0, Number(opts&&opts.total)||0);
@@ -659,27 +720,48 @@ function _messageVirtualWindow(opts){
   if(total<=Math.max(threshold, keepTailCount)){
     return {virtualized:false,start:0,end:total,topPad:0,bottomPad:0,total,tailStart};
   }
+  // Build or reuse prefix-sum cache for O(log N) binary search.
+  // Heights are stable during scroll, so caching by reference avoids rebuilding.
+  // Defensive init for test harnesses that eval this function in isolation.
+  if(typeof _messageVirtualPrefixSum==='undefined') _messageVirtualPrefixSum=null;
+  if(typeof _messageVirtualPrefixSumHeights==='undefined') _messageVirtualPrefixSumHeights=null;
+  if(typeof _messageVirtualPrefixSumLen==='undefined') _messageVirtualPrefixSumLen=0;
+  let prefixSum=_messageVirtualPrefixSum;
+  if(prefixSum===null||_messageVirtualPrefixSumHeights!==heights||_messageVirtualPrefixSumLen!==tailStart){
+    prefixSum=new Float64Array(tailStart+1);
+    let acc=0;
+    for(let i=0;i<tailStart;i++){
+      acc+=rowHeightFor(i);
+      prefixSum[i+1]=acc;
+    }
+    _messageVirtualPrefixSum=prefixSum;
+    _messageVirtualPrefixSumHeights=heights;
+    _messageVirtualPrefixSumLen=tailStart;
+  }
   const scrollTop=Math.max(0, Number(opts&&opts.scrollTop)||0);
   const targetTop=Math.max(0, scrollTop-bufferPx);
   const targetBottom=scrollTop+viewportHeight+bufferPx;
-  let start=0;
-  let offset=0;
-  while(start<tailStart&&offset+rowHeightFor(start)<=targetTop){
-    offset+=rowHeightFor(start);
-    start++;
+  // Binary search: find last index where prefixSum[start] <= targetTop
+  // prefixSum has tailStart+1 entries (0..tailStart), so search full range
+  let lo=0, hi=tailStart, start=0;
+  while(lo<=hi){
+    const mid=(lo+hi)>>>1;
+    if(prefixSum[mid]<=targetTop){start=mid;lo=mid+1;}
+    else hi=mid-1;
   }
   if(start>=tailStart){
-    return {virtualized:true,start:tailStart,end:tailStart,topPad:offset,bottomPad:0,total,tailStart};
+    return {virtualized:true,start:tailStart,end:tailStart,topPad:prefixSum[tailStart],bottomPad:0,total,tailStart};
   }
-  let end=start;
-  let cursor=offset;
-  while(end<tailStart&&cursor<targetBottom){
-    cursor+=rowHeightFor(end);
-    end++;
+  // Binary search: find first index where prefixSum[end] >= targetBottom
+  lo=start+1; hi=tailStart-1; let end=tailStart;
+  while(lo<=hi){
+    const mid=(lo+hi)>>>1;
+    if(prefixSum[mid]>=targetBottom){end=mid;hi=mid-1;}
+    else lo=mid+1;
   }
-  if(end<=start) end=Math.min(total, start+1);
-  let bottomPad=0;
-  for(let i=end;i<tailStart;i++) bottomPad+=rowHeightFor(i);
+  if(end<=start) end=start+1;
+  const offset=prefixSum[start];
+  const bottomPad=prefixSum[tailStart]-prefixSum[end];
   return {
     virtualized:true,
     start,
@@ -751,12 +833,25 @@ function _messageVirtualHeightPrefixEntryMatches(previousEntry, nextEntry){
   );
 }
 function _syncMessageVirtualHeightCache(visWithIdx){
+  const msgs=S.messages||[];
+  const len=msgs.length;
+  // Fast path: if S.messages hasn't changed, the height cache is still valid.
+  // Check BEFORE building nextEntries to avoid O(N) map on every scroll.
+  if(
+    _messageVirtualHeightCacheLen===len &&
+    _messageVirtualHeightCacheSrc===msgs &&
+    Array.isArray(_messageVirtualHeightCacheEntries)
+  ){
+    // Only verify visWithIdx length matches (cheap — no allocation).
+    // If visWithIdx length changed, the entries must have changed too.
+    if(_messageVirtualHeightCacheEntries.length===visWithIdx.length) return;
+  }
   const nextEntries=Array.isArray(visWithIdx)
     ? visWithIdx.map(entry=>entry?{rawIdx:entry.rawIdx,m:entry.m}:entry)
     : [];
   if(
-    _messageVirtualHeightCacheLen===S.messages.length &&
-    _messageVirtualHeightCacheSrc===S.messages &&
+    _messageVirtualHeightCacheLen===len &&
+    _messageVirtualHeightCacheSrc===msgs &&
     _messageVirtualHeightCacheEntries.length===nextEntries.length
   ) return;
   const previousEntries=Array.isArray(_messageVirtualHeightCacheEntries)?_messageVirtualHeightCacheEntries:[];
@@ -766,8 +861,8 @@ function _syncMessageVirtualHeightCache(visWithIdx){
     nextHeights=new Array(nextEntries.length);
   }else if(!nextEntries.length){
     _clearMessageVirtualHeightCache();
-    _messageVirtualHeightCacheLen=S.messages.length;
-    _messageVirtualHeightCacheSrc=S.messages;
+    _messageVirtualHeightCacheLen=len;
+    _messageVirtualHeightCacheSrc=msgs;
     return;
   }else{
     const sharedPrefix=Math.min(previousEntries.length,nextEntries.length);
@@ -806,8 +901,8 @@ function _syncMessageVirtualHeightCache(visWithIdx){
     _messageVirtualWindowKey='';
   }
   _messageVirtualHeightCacheEntries=nextEntries;
-  _messageVirtualHeightCacheLen=S.messages.length;
-  _messageVirtualHeightCacheSrc=S.messages;
+  _messageVirtualHeightCacheLen=len;
+  _messageVirtualHeightCacheSrc=msgs;
 }
 function _messageVirtualRoleForEntry(entry){
   const m=entry&&entry.m;
@@ -1198,6 +1293,11 @@ function _compensateScrollForMeasurementDelta(renderFn){
   const scrollTopBefore=container.scrollTop;
   container.classList.add('vscroll-measuring');
   try{ renderFn(); }finally{ container.classList.remove('vscroll-measuring'); }
+  // During active scroll, skip scrollTop compensation: it arms _programmaticScroll
+  // which blocks the next 80 ms of user scroll input → perceived as stutter +
+  // jump-back. After scroll settles, deferred measurement runs one clean render
+  // with compensation instead of a cascade during the scroll itself.
+  if(_messageVirtualScrollActive) return;
   if(!anchorBefore) return;
   if(scrollTopBefore<1){
     const spacer=container.querySelector('[data-virtual-spacer="before"]');
@@ -1363,14 +1463,29 @@ function _updateMessageVirtualMeasurements(renderVisWithIdx, renderVisibleIdxs, 
   let changed=false;
   let measuredCount=0;
   let measuredTotal=0;
+  const prevSet=_messageVirtualPrevMeasuredSet;
   for(let vi=0;vi<renderVisWithIdx.length;vi++){
     const entry=renderVisWithIdx[vi];
     if(!entry) continue;
-    const totalHeight=_measureMessageVirtualRow(inner, entry);
-    if(totalHeight<=0) continue;
     const visibleIdx=Number(renderVisibleIdxs&&renderVisibleIdxs[vi]);
     if(!Number.isFinite(visibleIdx)) continue;
-    if(Math.abs((Number(_messageVirtualHeightCache[visibleIdx])||0)-totalHeight)>1){
+    // Delta: skip DOM read for rows already measured in a prior cycle.
+    // Their cached height is still valid (content hasn't changed for settled rows,
+    // and streaming rows invalidate the cache via _clearMessageVirtualHeightCache).
+    let totalHeight;
+    if(prevSet.has(entry.rawIdx)){
+      totalHeight=Number(_messageVirtualHeightCache[visibleIdx])||0;
+    }else{
+      totalHeight=_measureMessageVirtualRow(inner, entry);
+      prevSet.add(entry.rawIdx);
+      // Evict the set when it grows too large — Set.has() on 10k+ entries
+      // adds measurable overhead per scroll cycle, and stale entries for
+      // rows scrolled out of view are useless noise.
+      if(prevSet.size>MESSAGE_VIRTUAL_PREV_MEASURED_MAX) prevSet.clear();
+    }
+    if(totalHeight<=0) continue;
+    const oldHeight=Number(_messageVirtualHeightCache[visibleIdx])||0;
+    if(Math.abs(oldHeight-totalHeight)>1){
       _messageVirtualHeightCache[visibleIdx]=totalHeight;
       changed=true;
     }
@@ -1381,6 +1496,26 @@ function _updateMessageVirtualMeasurements(renderVisWithIdx, renderVisibleIdxs, 
     _messageVirtualEstimatedRowHeight=Math.max(60, Math.round(measuredTotal/measuredCount));
   }
   if(changed){
+    // After measurements change heights in-place, rebuild prefix-sum from
+    // the authoritative source (_messageVirtualHeightCache) to guarantee
+    // consistency.  When MAX_RERENDERS caps the measurement loop, some rows
+    // remain unmeasured and any delta-chain diverges from reality, causing
+    // cumulative scroll-position drift.  A single O(N) rebuild here is the
+    // only path that guarantees prefixSum matches heights exactly.
+    const heights=_messageVirtualHeightCache;
+    const tailStart=virtualWindow.tailStart||0;
+    const expectedLen=tailStart+1;
+    const visWithIdx=_getVisibleMessagesWithIdx();
+    const prefixSum=new Float64Array(expectedLen);
+    let acc=0;
+    for(let i=0;i<tailStart;i++){
+      const h=Number(heights[i]);
+      acc+=(h>0)?h:_messageVirtualDefaultHeightForRole(_messageVirtualRoleForEntry(visWithIdx[i]));
+      prefixSum[i+1]=acc;
+    }
+    _messageVirtualPrefixSum=prefixSum;
+    _messageVirtualPrefixSumHeights=heights;
+    _messageVirtualPrefixSumLen=tailStart;
     _scheduleMessageVirtualMeasurementRefresh(virtualWindow);
   }else{
     _markMessageVirtualMeasurementsSettled(virtualWindow);
@@ -1509,7 +1644,10 @@ function _getCachedRender(text, isUser){
   const rendered = isUser
     ? (window._renderUserMarkdown ? renderMd(text) : _renderUserFencedBlocks(text))
     : renderMd(_stripXmlToolCallsDisplay(String(text)));
-  if(_renderCache.size > _renderCacheMax) _renderCache.clear();
+  // Evict oldest entries instead of clearing the entire cache — a full
+  // clear on every overflow causes all messages to re-render their markdown
+  // on the next renderMessages(), triggering GC pauses in long sessions.
+  while(_renderCache.size > _renderCacheMax) _renderCache.delete(_renderCache.keys().next().value);
   _renderCache.set(key, rendered);
   return rendered;
 }
@@ -6019,9 +6157,9 @@ if(typeof window!=='undefined'){
   },{capture:true,passive:true});
   let _scrollRaf=0;
   el.addEventListener('scroll',()=>{
-    _scheduleMessageVirtualizedRender();
     if(_programmaticScroll&&(performance.now()-_programmaticScrollSetAt)>150) _programmaticScroll=false;
     if(_programmaticScroll) return;
+    _scheduleMessageVirtualizedRender();
     _markMessageVirtualScrollActive();
     cancelAnimationFrame(_scrollRaf);
     _scrollRaf=requestAnimationFrame(()=>{
@@ -14373,9 +14511,15 @@ function _hasActiveTodoItems(items){
   });
 }
 function _latestPreservedCompressionTaskListMessages(messages){
-  const latest=[...(messages||[])].reverse().find(m=>_isPreservedCompressionTaskListMessage(m));
+  // Scan backward without copying the array — [...messages].reverse() allocates
+  // a full copy of all messages on every renderMessages() call.
+  const msgs=messages||[];
+  let latest=null;
+  for(let i=msgs.length-1;i>=0;i--){
+    if(_isPreservedCompressionTaskListMessage(msgs[i])){latest=msgs[i];break;}
+  }
   if(!latest) return [];
-  const latestTodos=_latestTodoToolItems(messages);
+  const latestTodos=_latestTodoToolItems(msgs);
   if(Array.isArray(latestTodos) && !_hasActiveTodoItems(latestTodos)) return [];
   return [latest];
 }
@@ -15714,7 +15858,7 @@ function renderMessages(options){
     ? visWithIdx.slice(renderTailStart)
     : [];
   const renderVisWithIdx=renderHeadVisWithIdx.concat(renderTailVisWithIdx);
-  // Lifted so selective removal above can use it before the wipe point.
+  // Lifted from line ~16083 so selective removal below can use it before the wipe point.
   const renderedRawIdxs=new Set(renderVisWithIdx.map(e=>e.rawIdx));
   const renderVisibleIdxs=[
     ...renderHeadVisWithIdx.map((_,idx)=>windowStart+idx),
@@ -15808,27 +15952,6 @@ function renderMessages(options){
     S.session && typeof S.session.compression_anchor_summary==='string'
   ) ? S.session.compression_anchor_summary.trim() : '';
   const worklogDetailDisclosureState=_captureWorklogDetailDisclosureState(inner);
-  // P0: selective removal instead of innerHTML='' — avoids forced synchronous
-  // layout flush (which triggers 200+ Layout events in the trace).  Detach
-  // each child individually and stash for recycling; the rebuild loop below
-  // re-appends stashed nodes instead of allocating new ones.  This path is
-  // always active (not gated by _msgNodeRecycleEnabled) because even non-
-  // virtualized renders benefit from avoiding the innerHTML wipe.
-  _recycleStash.clear();
-  {
-    const toRemove=Array.from(inner.children);
-    for(const child of toRemove){
-      // Preserve the live assistant turn node — the smd parser holds a live
-      // reference into it; detaching it breaks mid-stream rendering.
-      if(child.id==='liveAssistantTurn') continue;
-      if(child.querySelector&&child.querySelector('#liveAssistantTurn')) continue;
-      const key=child.dataset&&(child.dataset.recycleKey||child.dataset.msgIdx);
-      if(key!==undefined&&key!==null){
-        _recycleStash.set(Number(key), child);
-      }
-      inner.removeChild(child);
-    }
-  }
   // Mobile scroll-jank fix: temporarily disable overflow-anchor so Chromium
   // cannot re-anchor to the topmost row during the DOM wipe-and-rebuild gap.
   if(window._fixMobileScrollJank) window._fixMobileScrollJank();
@@ -15862,6 +15985,27 @@ function renderMessages(options){
   // the live reply stops following / appears to jump backward.
   _programmaticScroll=true;
   _programmaticScrollSetAt=performance.now();
+  // P0: selective removal instead of innerHTML='' — avoids forced synchronous
+  // layout flush (which triggers 200+ Layout events in the trace).  Detach
+  // each child individually and stash for recycling; the rebuild loop below
+  // re-appends stashed nodes instead of allocating new ones.  This path is
+  // always active (not gated by _msgNodeRecycleEnabled) because even non-
+  // virtualized renders benefit from avoiding the innerHTML wipe.
+  _recycleStash.clear();
+  {
+    const toRemove=Array.from(inner.children);
+    for(const child of toRemove){
+      // Preserve the live assistant turn node — the smd parser holds a live
+      // reference into it; detaching it breaks mid-stream rendering.
+      if(child.id==='liveAssistantTurn') continue;
+      if(child.querySelector&&child.querySelector('#liveAssistantTurn')) continue;
+      const key=child.dataset&&(child.dataset.recycleKey||child.dataset.msgIdx);
+      if(key!==undefined&&key!==null){
+        _recycleStash.set(Number(key), child);
+      }
+      inner.removeChild(child);
+    }
+  }
   const compressionNode=compressionState?_compressionCardsNode(compressionState):null;
   const {message:referenceMessage, rawIdx:referenceMessageRawIdx}=_latestCompressionReferenceMessage(
     S.messages,
@@ -15882,8 +16026,17 @@ function renderMessages(options){
     rawIdx++;
   }
   const firstRenderedRawIdx=renderVisWithIdx.length?renderVisWithIdx[0].rawIdx:Infinity;
-  const assistantTurnFinalVisibleContentByRawIdx=_assistantTurnFinalVisibleContentMap(visWithIdx);
-  const assistantTurnVisibleContentByRawIdx=_assistantTurnVisibleContentMap(visWithIdx);
+  // P0 optimization: limit full-array scans to the assistant-run containing the
+  // render window start.  _assistantTurnFinalVisibleContentMap and
+  // _assistantTurnVisibleContentMap are only consulted for rawIdx values that
+  // appear in renderVisWithIdx, so scanning from the start of that run to the
+  // end of visWithIdx is sufficient.
+  const _visScanStart=renderVisWithIdx.length
+    ? _findRunStartForWindow(visWithIdx, virtualWindow.start)
+    : 0;
+  const visScanSlice=visWithIdx.slice(_visScanStart);
+  const assistantTurnFinalVisibleContentByRawIdx=_assistantTurnFinalVisibleContentMap(visScanSlice);
+  const assistantTurnVisibleContentByRawIdx=_assistantTurnVisibleContentMap(visScanSlice);
   const hasServerOlder=!!(typeof _messagesTruncated!=='undefined' && _messagesTruncated && S.messages.length>0);
   const serverOlderCount=hasServerOlder&&Number.isFinite(Number(_oldestIdx))?Math.max(0,Number(_oldestIdx)):0;
   if(typeof _applySessionNavigationPrefs==='function') _applySessionNavigationPrefs();
@@ -15940,11 +16093,41 @@ function renderMessages(options){
   // assistant messages that appear in the current render window anyway.
   const questionRawIdxByAssistantRawIdx=new Map();
   let lastQuestionRawIdx=-1;
-  const renderableRawIdxs=new Set(visWithIdx.map(e=>e.rawIdx));
-  for(const entry of visWithIdx){
+  // O(1) renderable-range check replaces visWithIdx.map(e=>e.rawIdx) + Set —
+  // rawIdx in visWithIdx is monotonically increasing, so a range check is
+  // sufficient for the virtualized skip-guard below.
+  const visRawMin=visWithIdx.length?visWithIdx[0].rawIdx:Infinity;
+  const visRawMax=visWithIdx.length?visWithIdx[visWithIdx.length-1].rawIdx:-1;
+  const _isRenderableRawIdx=(idx)=>idx>=visRawMin&&idx<=visRawMax;
+  // P0 optimization: find the last user message before the window start,
+  // then only scan the render window for assistants.
+  // Seed for the head slice.
+  if(_visScanStart>0){
+    for(let i=_visScanStart-1;i>=0;i--){
+      const m=visWithIdx[i]&&visWithIdx[i].m;
+      if(m&&m.role==='user'){lastQuestionRawIdx=visWithIdx[i].rawIdx;break;}
+    }
+  }
+  // Process head slice.
+  for(const entry of renderHeadVisWithIdx){
     const role=entry&&entry.m&&entry.m.role;
     if(role==='user') lastQuestionRawIdx=entry.rawIdx;
-    else if(role==='assistant'&&renderedRawIdxs.has(entry.rawIdx)) questionRawIdxByAssistantRawIdx.set(entry.rawIdx,lastQuestionRawIdx);
+    else if(role==='assistant') questionRawIdxByAssistantRawIdx.set(entry.rawIdx,lastQuestionRawIdx);
+  }
+  // Process tail slice, but reset lastQuestionRawIdx first — the gap
+  // [windowEnd, renderTailStart) may contain user messages that the head
+  // never saw, so the first tail assistant must not inherit the head's seed.
+  if(renderTailVisWithIdx.length>0){
+    lastQuestionRawIdx=-1;
+    for(let i=renderTailStart-1;i>=0;i--){
+      const m=visWithIdx[i]&&visWithIdx[i].m;
+      if(m&&m.role==='user'){lastQuestionRawIdx=visWithIdx[i].rawIdx;break;}
+    }
+    for(const entry of renderTailVisWithIdx){
+      const role=entry&&entry.m&&entry.m.role;
+      if(role==='user') lastQuestionRawIdx=entry.rawIdx;
+      else if(role==='assistant') questionRawIdxByAssistantRawIdx.set(entry.rawIdx,lastQuestionRawIdx);
+    }
   }
   const assistantRawIdxByQuestionRawIdx=new Map();
   for(const [aIdx,qIdx] of questionRawIdxByAssistantRawIdx){
@@ -16773,7 +16956,7 @@ function renderMessages(options){
       if(tid&&transparentOrderedToolIds.has(tid)) continue;
       const aIdx=tc.assistant_msg_idx!==undefined?parseInt(tc.assistant_msg_idx):-1;
       if(anchorOwnedAssistantRawIdxs.has(aIdx)) continue;
-      if(virtualWindow.virtualized&&renderableRawIdxs.has(aIdx)&&!renderedRawIdxs.has(aIdx)) continue;
+      if(virtualWindow.virtualized&&_isRenderableRawIdx(aIdx)&&!renderedRawIdxs.has(aIdx)) continue;
       const segmentSeq=normalizeToken(tc.activitySegmentSeq);
       const burstId=normalizeToken(tc.activityBurstId);
       const burstResolvable=burstId&&knownBurstIds.has(burstId);
@@ -16784,7 +16967,7 @@ function renderMessages(options){
     }
     for(const aIdx of assistantThinking.keys()){
       if(anchorOwnedAssistantRawIdxs.has(aIdx)) continue;
-      if(virtualWindow.virtualized&&renderableRawIdxs.has(aIdx)&&!renderedRawIdxs.has(aIdx)) continue;
+      if(virtualWindow.virtualized&&_isRenderableRawIdx(aIdx)&&!renderedRawIdxs.has(aIdx)) continue;
       const seg=assistantSegments.get(aIdx);
       const segmentSeq=seg&&seg.getAttribute('data-live-segment-seq')||'';
       const burstId=seg&&seg.getAttribute('data-activity-burst-id')||'';
@@ -16795,7 +16978,7 @@ function renderMessages(options){
     for(const [aIdx,seg] of assistantSegments){
       if(anchorOwnedAssistantRawIdxs.has(aIdx)) continue;
       if(!seg||!seg.classList||!seg.classList.contains('assistant-segment-worklog-source')) continue;
-      if(virtualWindow.virtualized&&renderableRawIdxs.has(aIdx)&&!renderedRawIdxs.has(aIdx)) continue;
+      if(virtualWindow.virtualized&&_isRenderableRawIdx(aIdx)&&!renderedRawIdxs.has(aIdx)) continue;
       if(!_worklogReasonHtmlFromAnchor(seg)) continue;
       const segmentSeq=seg&&seg.getAttribute('data-live-segment-seq')||'';
       const burstId=seg&&seg.getAttribute('data-activity-burst-id')||'';
