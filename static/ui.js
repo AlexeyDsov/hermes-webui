@@ -15991,6 +15991,12 @@ function renderMessages(options){
   // re-appends stashed nodes instead of allocating new ones.  This path is
   // always active (not gated by _msgNodeRecycleEnabled) because even non-
   // virtualized renders benefit from avoiding the innerHTML wipe.
+  // With removeChild (unlike atomic innerHTML=''), the browser's overflow-anchor
+  // fires on each intermediate DOM state and can grab different elements mid-loop,
+  // causing scrollTop drift. Suppress it for the wipe cycle on all platforms.
+  const _messagesEl=$('messages');
+  const _prevOverflowAnchor=_messagesEl?_messagesEl.style.overflowAnchor:'';
+  if(_messagesEl) _messagesEl.style.overflowAnchor='none';
   _recycleStash.clear();
   {
     const toRemove=Array.from(inner.children);
@@ -16006,6 +16012,8 @@ function renderMessages(options){
       inner.removeChild(child);
     }
   }
+  // Restore overflow-anchor immediately after wipe so live streaming re-anchors correctly.
+  if(_messagesEl) _messagesEl.style.overflowAnchor=_prevOverflowAnchor;
   const compressionNode=compressionState?_compressionCardsNode(compressionState):null;
   const {message:referenceMessage, rawIdx:referenceMessageRawIdx}=_latestCompressionReferenceMessage(
     S.messages,
