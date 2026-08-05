@@ -551,8 +551,10 @@ let _messageVirtualMeasurementRetryCount=0;
 let _messageVirtualScrollActive=false;
 let _messageVirtualScrollSettleTimer=0;
 let _messageVirtualDeferredMeasurement=null;
-// Delta-measurement: track already-measured rawIdxs so we only read DOM for new rows
-let _messageVirtualPrevMeasuredSet=new Set();
+// Delta-measurement: track {rawIdx -> measuredHeight} so we only read DOM for new rows.
+// Storing the height lets us detect streaming updates: if the cached height diverged
+// from what we recorded, the message content changed and we must re-measure.
+let _messageVirtualPrevMeasuredMap=new Map();
 const MESSAGE_VIRTUAL_PREV_MEASURED_MAX=2000;
 // Binary search cache: prefix sums of heights for O(log N) window lookups
 let _messageVirtualPrefixSum=null;
@@ -598,7 +600,7 @@ function _clearMessageVirtualHeightCache(){
   _messageVirtualHeightCacheLen=0;
   _messageVirtualHeightCacheSrc=null;
   _messageVirtualEstimatedRowHeight=_messageVirtualDefaultHeightForRole('default');
-  if(typeof _messageVirtualPrevMeasuredSet!=='undefined') _messageVirtualPrevMeasuredSet.clear();
+  if(typeof _messageVirtualPrevMeasuredMap!=='undefined') _messageVirtualPrevMeasuredMap.clear();
   // Invalidate prefix-sum cache when heights are cleared
   _messageVirtualPrefixSum=null;
   _messageVirtualPrefixSumHeights=null;
@@ -1463,25 +1465,28 @@ function _updateMessageVirtualMeasurements(renderVisWithIdx, renderVisibleIdxs, 
   let changed=false;
   let measuredCount=0;
   let measuredTotal=0;
-  const prevSet=_messageVirtualPrevMeasuredSet;
+  const prevMap=_messageVirtualPrevMeasuredMap;
   for(let vi=0;vi<renderVisWithIdx.length;vi++){
     const entry=renderVisWithIdx[vi];
     if(!entry) continue;
     const visibleIdx=Number(renderVisibleIdxs&&renderVisibleIdxs[vi]);
     if(!Number.isFinite(visibleIdx)) continue;
     // Delta: skip DOM read for rows already measured in a prior cycle.
-    // Their cached height is still valid (content hasn't changed for settled rows,
-    // and streaming rows invalidate the cache via _clearMessageVirtualHeightCache).
+    // We store the height we last measured alongside rawIdx so we can detect
+    // streaming updates: if the cached height at visibleIdx diverged from what
+    // we recorded, the message content changed and we must re-measure.
     let totalHeight;
-    if(prevSet.has(entry.rawIdx)){
-      totalHeight=Number(_messageVirtualHeightCache[visibleIdx])||0;
+    const cachedHeight=Number(_messageVirtualHeightCache[visibleIdx])||0;
+    const prevHeight=prevMap.get(entry.rawIdx);
+    if(prevHeight!==undefined && cachedHeight===prevHeight){
+      totalHeight=cachedHeight;
     }else{
       totalHeight=_measureMessageVirtualRow(inner, entry);
-      prevSet.add(entry.rawIdx);
-      // Evict the set when it grows too large — Set.has() on 10k+ entries
+      if(totalHeight>0) prevMap.set(entry.rawIdx, totalHeight);
+      // Evict the map when it grows too large — Map.get() on 10k+ entries
       // adds measurable overhead per scroll cycle, and stale entries for
       // rows scrolled out of view are useless noise.
-      if(prevSet.size>MESSAGE_VIRTUAL_PREV_MEASURED_MAX) prevSet.clear();
+      if(prevMap.size>MESSAGE_VIRTUAL_PREV_MEASURED_MAX) prevMap.clear();
     }
     if(totalHeight<=0) continue;
     const oldHeight=Number(_messageVirtualHeightCache[visibleIdx])||0;
