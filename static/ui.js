@@ -1490,7 +1490,7 @@ function _scheduleMessageVirtualizedRender(force){
 // Cache the rendered HTML so unchanged messages skip the expensive regex
 // pipeline entirely.  ~95% of messages are identical between renders.
 const _renderCache = new Map();
-const _renderCacheMax = 300;
+const _renderCacheMax = 10000;
 function _clearRenderCache(){ _renderCache.clear(); }
 function _renderCacheKey(text, isUser){
   // Fold render_user_markdown state into user-message keys so toggling the
@@ -15714,6 +15714,8 @@ function renderMessages(options){
     ? visWithIdx.slice(renderTailStart)
     : [];
   const renderVisWithIdx=renderHeadVisWithIdx.concat(renderTailVisWithIdx);
+  // Lifted so selective removal above can use it before the wipe point.
+  const renderedRawIdxs=new Set(renderVisWithIdx.map(e=>e.rawIdx));
   const renderVisibleIdxs=[
     ...renderHeadVisWithIdx.map((_,idx)=>windowStart+idx),
     ...renderTailVisWithIdx.map((_,idx)=>renderTailStart+idx),
@@ -15806,13 +15808,25 @@ function renderMessages(options){
     S.session && typeof S.session.compression_anchor_summary==='string'
   ) ? S.session.compression_anchor_summary.trim() : '';
   const worklogDetailDisclosureState=_captureWorklogDetailDisclosureState(inner);
+  // P0: selective removal instead of innerHTML='' — avoids forced synchronous
+  // layout flush (which triggers 200+ Layout events in the trace).  Detach
+  // each child individually and stash for recycling; the rebuild loop below
+  // re-appends stashed nodes instead of allocating new ones.  This path is
+  // always active (not gated by _msgNodeRecycleEnabled) because even non-
+  // virtualized renders benefit from avoiding the innerHTML wipe.
   _recycleStash.clear();
-  if(_msgNodeRecycleEnabled){
-    for(const child of Array.from(inner.children)){
+  {
+    const toRemove=Array.from(inner.children);
+    for(const child of toRemove){
+      // Preserve the live assistant turn node — the smd parser holds a live
+      // reference into it; detaching it breaks mid-stream rendering.
+      if(child.id==='liveAssistantTurn') continue;
+      if(child.querySelector&&child.querySelector('#liveAssistantTurn')) continue;
       const key=child.dataset&&(child.dataset.recycleKey||child.dataset.msgIdx);
-      if(!key) continue;
-      if(child.id==='liveAssistantTurn'||child.querySelector&&child.querySelector('#liveAssistantTurn')) continue;
-      _recycleStash.set(Number(key), child);
+      if(key!==undefined&&key!==null){
+        _recycleStash.set(Number(key), child);
+      }
+      inner.removeChild(child);
     }
   }
   // Mobile scroll-jank fix: temporarily disable overflow-anchor so Chromium
@@ -15848,7 +15862,6 @@ function renderMessages(options){
   // the live reply stops following / appears to jump backward.
   _programmaticScroll=true;
   _programmaticScrollSetAt=performance.now();
-  inner.innerHTML='';
   const compressionNode=compressionState?_compressionCardsNode(compressionState):null;
   const {message:referenceMessage, rawIdx:referenceMessageRawIdx}=_latestCompressionReferenceMessage(
     S.messages,
@@ -15927,7 +15940,6 @@ function renderMessages(options){
   // assistant messages that appear in the current render window anyway.
   const questionRawIdxByAssistantRawIdx=new Map();
   let lastQuestionRawIdx=-1;
-  const renderedRawIdxs=new Set(renderVisWithIdx.map(e=>e.rawIdx));
   const renderableRawIdxs=new Set(visWithIdx.map(e=>e.rawIdx));
   for(const entry of visWithIdx){
     const role=entry&&entry.m&&entry.m.role;
@@ -16175,7 +16187,7 @@ function renderMessages(options){
 
     if(isProcessWakeup){
       currentAssistantTurn=null;
-      let row=_msgNodeRecycleEnabled?_recycleStash.get(rawIdx):null;
+      let row=_recycleStash.get(rawIdx);
       if(row&&(!row.classList.contains('msg-row')||row.classList.contains('assistant-turn'))) row=null;
       const processText=String(rowDisplayContent||'').trim();
       const processFootHtml=`<div class="msg-foot">${timeHtml}<span class="msg-actions">${copyBtn}</span></div>`;
@@ -16240,7 +16252,7 @@ function renderMessages(options){
 
     if(isUser){
       currentAssistantTurn=null;
-      let row=_msgNodeRecycleEnabled?_recycleStash.get(rawIdx):null;
+      let row=_recycleStash.get(rawIdx);
       if(row&&(!row.classList.contains('msg-row')||row.classList.contains('assistant-turn'))) row=null;
       const newRawText=String(displayContent).trim();
       const nextRowHtml=`${filesHtml}<div class="msg-body">${bodyHtml}</div>${footHtml}`;
@@ -16281,7 +16293,7 @@ function renderMessages(options){
     }
 
     if(!currentAssistantTurn){
-      let recycled=_msgNodeRecycleEnabled?_recycleStash.get(rawIdx):null;
+      let recycled=_recycleStash.get(rawIdx);
       if(recycled&&!recycled.classList.contains('assistant-turn')) recycled=null;
       if(recycled){
         const blocks=_assistantTurnBlocks(recycled);
