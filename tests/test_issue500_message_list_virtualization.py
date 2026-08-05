@@ -112,8 +112,8 @@ def test_render_messages_uses_virtual_window_and_spacer_measurement_path():
     assert "_messageVirtualSpacer(virtualWindow.topPad,'before')" in render_body
     assert "_messageVirtualSpacer(virtualWindow.bottomPad,'after')" in render_body
     assert "_updateMessageVirtualMeasurements(renderVisWithIdx, renderVisibleIdxs, virtualWindow);" in render_body
-    assert "const renderableRawIdxs=new Set(visWithIdx.map(e=>e.rawIdx));" in render_body
-    assert "if(virtualWindow.virtualized&&renderableRawIdxs.has(aIdx)&&!renderedRawIdxs.has(aIdx)) continue;" in render_body
+    assert "const _isRenderableRawIdx=(idx)=>idx>=visRawMin&&idx<=visRawMax;" in render_body
+    assert "if(virtualWindow.virtualized&&_isRenderableRawIdx(aIdx)&&!renderedRawIdxs.has(aIdx)) continue;" in render_body
     assert "if(hasServerOlder){" in render_body
     assert "_showEarlierRenderedMessages();" not in render_body
     top_spacer_idx = render_body.index("_messageVirtualSpacer(virtualWindow.topPad,'before')")
@@ -885,6 +885,7 @@ function $(id){ return id === 'messages' ? container : null; }
 function _captureMessageViewportAnchor(){ return null; }
 let _programmaticScroll = false;
 let _lastScrollTop = 0;
+let _messageVirtualScrollActive = false;
 function _scheduleMessageVirtualizedRender(){ renderCalls.push(true); }
 function requestAnimationFrame(cb){ cb(); }
 eval(extractFunc('_compensateScrollForMeasurementDelta'));
@@ -937,6 +938,7 @@ function _deferClearProgrammaticScroll(ms){clearTimeout(_programmaticScrollReset
 let renderCalls = [];
 function _scheduleMessageVirtualizedRender(){ renderCalls.push(true); }
 function requestAnimationFrame(cb){ cb(); }
+let _messageVirtualScrollActive = false;
 eval(extractFunc('_compensateScrollForMeasurementDelta'));
 _compensateScrollForMeasurementDelta(()=>{ _scheduleMessageVirtualizedRender(true); });
 console.log(JSON.stringify({
@@ -989,6 +991,7 @@ function _deferClearProgrammaticScroll(ms){clearTimeout(_programmaticScrollReset
 let renderCalls = [];
 function _scheduleMessageVirtualizedRender(){ renderCalls.push(true); }
 function requestAnimationFrame(cb){ cb(); }
+let _messageVirtualScrollActive = false;
 eval(extractFunc('_compensateScrollForMeasurementDelta'));
 _compensateScrollForMeasurementDelta(()=>{ _scheduleMessageVirtualizedRender(true); });
 console.log(JSON.stringify({
@@ -1041,6 +1044,7 @@ function _scheduleMessageVirtualizedRender(){ renderCalls.push(true); }
 function _deferClearProgrammaticScroll(ms){clearTimeout(_programmaticScrollResetTimer);_programmaticScrollResetTimer=setTimeout(()=>{_programmaticScroll=false;},ms||80);}
 function requestAnimationFrame(cb){ cb(); }
 function setTimeout(cb, delay){ cb(); return 1; }
+let _messageVirtualScrollActive = false;
 eval(extractFunc('_compensateScrollForMeasurementDelta'));
 _compensateScrollForMeasurementDelta(()=>{ _scheduleMessageVirtualizedRender(true); });
 console.log(JSON.stringify({
