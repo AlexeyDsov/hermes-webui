@@ -15991,6 +15991,17 @@ function renderMessages(options){
   // re-appends stashed nodes instead of allocating new ones.  This path is
   // always active (not gated by _msgNodeRecycleEnabled) because even non-
   // virtualized renders benefit from avoiding the innerHTML wipe.
+  //
+  // CRITICAL: disable overflow-anchor around the removal loop. With innerHTML=''
+  // the wipe is atomic — the browser sees only the before/after states. With
+  // removeChild one-by-one, the browser's overflow-anchor machinery fires on
+  // each intermediate DOM state and can "grab" different elements mid-loop,
+  // causing scrollTop to drift to random positions. Disabling it for the
+  // entire wipe+rebuild cycle prevents this flaky behavior.
+  const messagesEl=$('messages');
+  if(messagesEl){
+    messagesEl.style.overflowAnchor='none';
+  }
   _recycleStash.clear();
   {
     const toRemove=Array.from(inner.children);
@@ -17499,6 +17510,10 @@ function renderMessages(options){
     queueMicrotask(()=>_reanchorPinnedTailAfterRender(_preWipeNearTail));
   }
   _recycleStash.clear();
+  // Restore overflow-anchor after rebuild so normal scroll anchoring resumes.
+  if(messagesEl && messagesEl.style.overflowAnchor==='none'){
+    messagesEl.style.overflowAnchor='';
+  }
   if(typeof _deferClearProgrammaticScroll==='function') _deferClearProgrammaticScroll(160);
 }
 
