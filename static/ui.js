@@ -15990,6 +15990,9 @@ function renderMessages(options){
   // Stash children for recycling BEFORE the wipe, then use innerHTML='' for
   // an atomic clear that doesn't trigger intermediate overflow-anchor events.
   _recycleStash.clear();
+  // Collect assistant segments for recycling (they're inside turns, not direct children of inner)
+  let _segCache=new Map();
+  let _reusedSegRawIdxs=new Set();
   {
     // Preserve the live assistant turn node — the smd parser holds a live
     // reference into it; detaching it breaks mid-stream rendering.
@@ -16008,6 +16011,18 @@ function renderMessages(options){
       const key=child.dataset&&(child.dataset.recycleKey||child.dataset.msgIdx);
       if(key!==undefined&&key!==null){
         _recycleStash.set(Number(key), child);
+      }
+    }
+    // Collect segments before wipe so the rebuild loop can reuse unchanged ones
+    for(const child of inner.children){
+      if(child.classList?.contains('assistant-turn')&&child!==liveNode){
+        const blocks=child.querySelector('.assistant-turn-blocks');
+        if(blocks){
+          for(const s of blocks.children){
+            const ri=s.dataset?.msgIdx;
+            if(ri!==undefined&&ri!==null) _segCache.set(Number(ri),s);
+          }
+        }
       }
     }
     // Atomic wipe — no intermediate DOM states for overflow-anchor to grab.
@@ -16501,7 +16516,10 @@ function renderMessages(options){
       if(recycled&&!recycled.classList.contains('assistant-turn')) recycled=null;
       if(recycled){
         const blocks=_assistantTurnBlocks(recycled);
-        if(blocks) blocks.innerHTML='';
+        // P0: skip blocks.innerHTML='' — the rebuild loop below reuses cached
+        // segments via _segCache, so wiping them here would destroy the very
+        // nodes we want to recycle.  Stale segments (no longer in the render
+        // list) are removed at the end of the loop.
         for(const attr of _recycleResetAttrs) recycled.removeAttribute(attr);
         const role=recycled.querySelector('.msg-role.assistant');
         if(role) role.outerHTML=_assistantRoleHtml(tsTitle, isTpsDisplayEnabled()?_formatTurnTps(m._turnTps):'');
@@ -16515,7 +16533,50 @@ function renderMessages(options){
       inner.appendChild(currentAssistantTurn);
     }
     _setLatestAssistantTurnLandmark(currentAssistantTurn, !m._live&&rawIdx===latestRenderedAssistantRawIdx);
-    const seg=document.createElement('div');
+    // P0: compute worklog eligibility before cache check so we can skip
+    // reusing a cached segment whose visibility status changed.
+    const messageBelongsInWorklog=!S.busy&&isCompactWorklogMode()&&_assistantMessageBelongsInWorklog(m, rawIdx, toolCallAssistantIdxs, displayContent, {isTurnFinalAssistant});
+    // P0: reuse cached segment if content unchanged — avoids ParseHTML for
+    // segments whose HTML hasn't changed between renderMessages() calls.
+    const blocks=_assistantTurnBlocks(currentAssistantTurn);
+    const cachedSeg=_segCache.get(rawIdx);
+    const segBodyHtml=thinkingText&&window._showThinking!==false
+      ? _thinkingCardHtml(thinkingText)
+      : '';
+    const segContentHtml=statusHtml
+      ? statusHtml
+      : (String(content||'').trim()||filesHtml||statusHtml||recoveryHtml ? `${filesHtml}<div class=\"msg-body\">${bodyHtml}</div>${footHtml}` : '');
+    const segFullHtml=segBodyHtml+segContentHtml;
+    let seg;
+    if(cachedSeg
+      && cachedSeg.classList.contains('assistant-segment')
+      && !Array.isArray(orderedTransparentParts)  // transparent path always rebuilds
+      && cachedSeg.dataset.rawText===String(content||'').trim()
+      && cachedSeg.innerHTML===segFullHtml
+      // Re-check worklog eligibility — a segment that was visible may now belong in worklog
+      && !(messageBelongsInWorklog !== undefined && messageBelongsInWorklog && !cachedSeg.hidden)
+    ){
+      // Content unchanged — reuse the cached segment in-place
+      seg=cachedSeg;
+      _reusedSegRawIdxs.add(rawIdx);
+      // Ensure attributes are current (handles edge cases like live flag)
+      seg.dataset.msgIdx=rawIdx;
+      seg.dataset.sessionMsgIdx=_messageSessionIndexForRawIdx(rawIdx);
+      seg.dataset.messageAnchorKey=_messageViewportAnchorKeyForMessage(m);
+      if(m._activityBurstId!==undefined&&m._activityBurstId!==null) seg.setAttribute('data-activity-burst-id',String(m._activityBurstId));
+      if(Number.isFinite(Number(m._liveSegmentSeq))) seg.setAttribute('data-live-segment-seq',String(Number(m._liveSegmentSeq)));
+      if(m._live){
+        currentAssistantTurn.id='liveAssistantTurn';
+        if(S.session) currentAssistantTurn.dataset.sessionId=S.session.session_id;
+        seg.setAttribute('data-live-assistant','1');
+      }
+      if(_ERR_MSG_RE.test(String(content||'').trim())) seg.dataset.error='1';
+      // Reposition to correct order — appendChild on existing node moves it
+      _assistantTurnBlocks(currentAssistantTurn).appendChild(seg);
+      assistantSegments.set(rawIdx, seg);
+      continue;
+    }
+    seg=document.createElement('div');
     if(Array.isArray(orderedTransparentParts)&&orderedTransparentParts.length){
       const blocks=_assistantTurnBlocks(currentAssistantTurn);
       const sessionMsgIdx=_messageSessionIndexForRawIdx(rawIdx);
@@ -16581,7 +16642,6 @@ function renderMessages(options){
     seg.dataset.rawText=String(content).trim();
     if(m._activityBurstId!==undefined&&m._activityBurstId!==null) seg.setAttribute('data-activity-burst-id',String(m._activityBurstId));
     if(Number.isFinite(Number(m._liveSegmentSeq))) seg.setAttribute('data-live-segment-seq',String(Number(m._liveSegmentSeq)));
-    const messageBelongsInWorklog=!S.busy&&isCompactWorklogMode()&&_assistantMessageBelongsInWorklog(m, rawIdx, toolCallAssistantIdxs, displayContent, {isTurnFinalAssistant});
     if(messageBelongsInWorklog){
       seg.classList.add('assistant-segment-worklog-source');
       seg.setAttribute('aria-hidden','true');
@@ -16634,6 +16694,24 @@ function renderMessages(options){
     }
     _assistantTurnBlocks(currentAssistantTurn).appendChild(seg);
     assistantSegments.set(rawIdx, seg);
+  }
+
+  // P0: remove stale segments from recycled turns — segments that were in the
+  // previous render but are no longer in the current window or had content that
+  // changed (so a fresh segment was created above).
+  for(const child of inner.children){
+    if(!child.classList?.contains('assistant-turn')) continue;
+    const blks=child.querySelector('.assistant-turn-blocks');
+    if(!blks) continue;
+    for(const s of blks.children){
+      const ri=s.dataset?.msgIdx;
+      if(ri!==undefined&&ri!==null){
+        const key=Number(ri);
+        if(!_reusedSegRawIdxs.has(key)&&assistantSegments.get(key)!==s){
+          s.remove();
+        }
+      }
+    }
   }
 
   function _insertCompressionLikeNode(node, anchorIndex){

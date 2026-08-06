@@ -60,7 +60,7 @@ function extractBody(startMarker, endMarker, startFrom = 0) {{
 
 def test_recycled_assistant_turn_reuse_clears_live_anchor_attrs():
     script = _js_prefix() + """
-const recycleChunk = extractBetween("if(!currentAssistantTurn){", "const seg=document.createElement('div');");
+const recycleChunk = extractBetween("if(!currentAssistantTurn){", "seg=document.createElement('div');");
 const resetListChunk = extractBetween("const _recycleResetAttrs=[", "let _scrollbarDragActive=false;")
   .replace("const _recycleResetAttrs=", "var _recycleResetAttrs=");
 const removedAttrs = [];
@@ -91,7 +91,35 @@ const isTpsDisplayEnabled = () => true;
 const _formatTurnTps = value => `tps:${value}`;
 const latestRenderedAssistantRawIdx = rawIdx;
 function _setLatestAssistantTurnLandmark() {}
-eval(recycleChunk);
+// Stubs for segment cache logic
+const _segCache = new Map();
+const _reusedSegRawIdxs = new Set();
+let thinkingText = '';
+let statusHtml = '';
+let filesHtml = '';
+let bodyHtml = '';
+let footHtml = '';
+let content = 'stub content';
+let recoveryHtml = '';
+let displayContent = 'stub content';
+const orderedTransparentParts = null;
+const toolCallAssistantIdxs = new Set();
+const isTurnFinalAssistant = false;
+function _thinkingCardHtml() { return ''; }
+function isCompactWorklogMode() { return false; }
+function isTransparentStream() { return false; }
+function _assistantMessageBelongsInWorklog() { return false; }
+S.busy = false;
+m._activityBurstId = undefined;
+m._liveSegmentSeq = undefined;
+m._live = false;
+m.role = 'assistant';
+function _messageSessionIndexForRawIdx() { return 0; }
+function _messageViewportAnchorKeyForMessage() { return 'key'; }
+const assistantSegments = new Map();
+const _ERR_MSG_RE = /^ERR:/;
+// Wrap in a loop so that `continue` statements in the extracted chunk work
+eval(`for(let i=0;i<1;i++){${recycleChunk}}`);
 console.log(JSON.stringify({
   removedAttrs,
   resetAttrs: _recycleResetAttrs,
@@ -131,7 +159,7 @@ console.log(JSON.stringify({
 
 def test_recycled_assistant_turn_reuse_keeps_block_clear_and_role_refresh():
     script = _js_prefix() + """
-const recycleChunk = extractBetween("if(!currentAssistantTurn){", "const seg=document.createElement('div');");
+const recycleChunk = extractBetween("if(!currentAssistantTurn){", "seg=document.createElement('div');");
 const resetListChunk = extractBetween("const _recycleResetAttrs=[", "let _scrollbarDragActive=false;")
   .replace("const _recycleResetAttrs=", "var _recycleResetAttrs=");
 const removedAttrs = [];
@@ -162,7 +190,35 @@ const isTpsDisplayEnabled = () => true;
 const _formatTurnTps = value => `tps:${value}`;
 const latestRenderedAssistantRawIdx = rawIdx;
 function _setLatestAssistantTurnLandmark() {}
-eval(recycleChunk);
+// Stubs for segment cache logic
+const _segCache = new Map();
+const _reusedSegRawIdxs = new Set();
+let thinkingText = '';
+let statusHtml = '';
+let filesHtml = '';
+let bodyHtml = '';
+let footHtml = '';
+let content = 'stub content';
+let recoveryHtml = '';
+let displayContent = 'stub content';
+const orderedTransparentParts = null;
+const toolCallAssistantIdxs = new Set();
+const isTurnFinalAssistant = false;
+function _thinkingCardHtml() { return ''; }
+function isCompactWorklogMode() { return false; }
+function isTransparentStream() { return false; }
+function _assistantMessageBelongsInWorklog() { return false; }
+S.busy = false;
+m._activityBurstId = undefined;
+m._liveSegmentSeq = undefined;
+m._live = false;
+m.role = 'assistant';
+function _messageSessionIndexForRawIdx() { return 0; }
+function _messageViewportAnchorKeyForMessage() { return 'key'; }
+const assistantSegments = new Map();
+const _ERR_MSG_RE = /^ERR:/;
+// Wrap in a loop so that `continue` statements in the extracted chunk work
+eval(`for(let i=0;i<1;i++){${recycleChunk}}`);
 console.log(JSON.stringify({
   blocksInnerHTML: blocks.innerHTML,
   roleHtml: role.replacement,
@@ -176,7 +232,8 @@ console.log(JSON.stringify({
 """
     result = _run_node(script)
 
-    assert result["blocksInnerHTML"] == ""
+    # P0: blocks.innerHTML is no longer cleared — segments are recycled in-place
+    assert result["blocksInnerHTML"] == "keep me"
     assert result["roleHtml"] == "role:Turn title:tps:42"
     assert result["currentAssistantTurnIsRecycled"] is True
     assert result["dataset"] == {
