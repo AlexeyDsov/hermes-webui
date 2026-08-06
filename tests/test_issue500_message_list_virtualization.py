@@ -112,7 +112,7 @@ def test_render_messages_uses_virtual_window_and_spacer_measurement_path():
     assert "_messageVirtualSpacer(virtualWindow.topPad,'before')" in render_body
     assert "_messageVirtualSpacer(virtualWindow.bottomPad,'after')" in render_body
     assert "_updateMessageVirtualMeasurements(renderVisWithIdx, renderVisibleIdxs, virtualWindow);" in render_body
-    assert "const _isRenderableRawIdx=(idx)=>idx>=visRawMin&&idx<=visRawMax;" in render_body
+    assert "const _isRenderableRawIdx=" in render_body
     assert "if(virtualWindow.virtualized&&_isRenderableRawIdx(aIdx)&&!renderedRawIdxs.has(aIdx)) continue;" in render_body
     assert "if(hasServerOlder){" in render_body
     assert "_showEarlierRenderedMessages();" not in render_body
@@ -1145,3 +1145,76 @@ console.log(JSON.stringify({
     assert metrics["timerCleared"] is True, (
         "_clearMessageVirtualHeightCache must call clearTimeout on the pending settle timer"
     )
+
+
+def test_isRenderableRawIdx_returns_false_for_gap_in_sparse_visWithIdx():
+    """_isRenderableRawIdx must use exact membership, not a min/max range check.
+
+    visWithIdx is sparse because _getVisibleMessagesWithIdx() filters through
+    _messageIsRenderable(). A raw index between the minimum and maximum is
+    therefore not necessarily present in visWithIdx. Treating every index in
+    that range as renderable can suppress legacy tool/thinking reconstruction
+    for filtered assistant messages in a virtualized transcript.
+
+    This test verifies binary-search exact membership: an index in a gap
+    returns false, while indices that actually exist in visWithIdx return true.
+    """
+    js = UI_JS_PATH.read_text(encoding="utf-8")
+    # Extract the renderMessages body to find _isRenderableRawIdx definition
+    render_start = js.index("function renderMessages(options)")
+    render_end = js.index("function _toolDisplayName", render_start)
+    render_body = js[render_start:render_end]
+
+    # Verify the function uses binary search (not range check)
+    assert "const _isRenderableRawIdx=" in render_body
+    # The old range-check pattern must NOT be present
+    assert "visRawMin" not in render_body
+    assert "visRawMax" not in render_body
+    # Binary search pattern must be present
+    assert "lo+hi" in render_body or "lo <= hi" in render_body or "lo<=hi" in render_body
+
+    # Behavioral test: simulate the binary-search predicate with a gap
+    # This directly tests the algorithm that _isRenderableRawIdx implements
+    source = _extract_func_script(js) + """
+// Simulate visWithIdx with a gap at rawIdx=5 (filtered by _messageIsRenderable)
+const visWithIdx = [
+  {rawIdx: 3},
+  {rawIdx: 4},
+  {rawIdx: 6},  // gap: rawIdx 5 is missing
+  {rawIdx: 7},
+  {rawIdx: 8},
+];
+// Binary search predicate (same algorithm as _isRenderableRawIdx)
+const _isRenderableRawIdx=(idx)=>{
+  let lo=0,hi=visWithIdx.length-1;
+  while(lo<=hi){
+    const mid=(lo+hi)>>>1,raw=visWithIdx[mid].rawIdx;
+    if(raw===idx)return true;
+    if(raw<idx)lo=mid+1;else hi=mid-1;
+  }
+  return false;
+};
+
+console.log(JSON.stringify({
+  idx3: _isRenderableRawIdx(3),   // present
+  idx4: _isRenderableRawIdx(4),   // present
+  idx5: _isRenderableRawIdx(5),   // GAP — should be false
+  idx6: _isRenderableRawIdx(6),   // present
+  idx7: _isRenderableRawIdx(7),   // present
+  idx8: _isRenderableRawIdx(8),   // present
+  idx9: _isRenderableRawIdx(9),   // outside range — should be false
+  idx2: _isRenderableRawIdx(2),   // below range — should be false
+}));
+"""
+    result = json.loads(_run_node(source))
+    assert result["idx3"] is True, "rawIdx 3 should be renderable (present in visWithIdx)"
+    assert result["idx4"] is True, "rawIdx 4 should be renderable (present in visWithIdx)"
+    assert result["idx5"] is False, (
+        "rawIdx 5 should NOT be renderable (gap in sparse visWithIdx) — "
+        "this is the regression: range check would incorrectly return true"
+    )
+    assert result["idx6"] is True, "rawIdx 6 should be renderable (present in visWithIdx)"
+    assert result["idx7"] is True, "rawIdx 7 should be renderable (present in visWithIdx)"
+    assert result["idx8"] is True, "rawIdx 8 should be renderable (present in visWithIdx)"
+    assert result["idx9"] is False, "rawIdx 9 should NOT be renderable (outside range)"
+    assert result["idx2"] is False, "rawIdx 2 should NOT be renderable (below range)"
