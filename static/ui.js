@@ -16358,12 +16358,18 @@ function renderMessages(options){
   // assistant messages that appear in the current render window anyway.
   const questionRawIdxByAssistantRawIdx=new Map();
   let lastQuestionRawIdx=-1;
-  // O(1) renderable-range check replaces visWithIdx.map(e=>e.rawIdx) + Set —
-  // rawIdx in visWithIdx is monotonically increasing, so a range check is
-  // sufficient for the virtualized skip-guard below.
-  const visRawMin=visWithIdx.length?visWithIdx[0].rawIdx:Infinity;
-  const visRawMax=visWithIdx.length?visWithIdx[visWithIdx.length-1].rawIdx:-1;
-  const _isRenderableRawIdx=(idx)=>idx>=visRawMin&&idx<=visRawMax;
+  // Exact membership via binary search over sorted visWithIdx (sorted by rawIdx).
+  // A range check is insufficient because visWithIdx is sparse — _getVisibleMessagesWithIdx()
+  // filters through _messageIsRenderable(), so raw indexes between min and max may have gaps.
+  const _isRenderableRawIdx=(idx)=>{
+    let lo=0,hi=visWithIdx.length-1;
+    while(lo<=hi){
+      const mid=(lo+hi)>>>1,raw=visWithIdx[mid].rawIdx;
+      if(raw===idx)return true;
+      if(raw<idx)lo=mid+1;else hi=mid-1;
+    }
+    return false;
+  };
   // P0 optimization: find the last user message before the window start,
   // then only scan the render window for assistants.
   // Seed for the head slice.
