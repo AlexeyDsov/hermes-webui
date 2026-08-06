@@ -16551,16 +16551,19 @@ function renderMessages(options){
     const segBodyHtml=thinkingText&&window._showThinking!==false
       ? _thinkingCardHtml(thinkingText)
       : '';
-    const segContentHtml=statusHtml
-      ? statusHtml
-      : (String(content||'').trim()||filesHtml||statusHtml||recoveryHtml ? `${filesHtml}<div class=\"msg-body\">${bodyHtml}</div>${footHtml}` : '');
-    const segFullHtml=segBodyHtml+segContentHtml;
+    // Only compare stable parts — footHtml contains position-dependent elements
+    // (retryBtn, questionJumpBtn) that change when the virtual window shifts.
+    // Body and footer are in separate containers so the footer can be updated
+    // independently on cached segments.
+    const hasVisibleBody=!!(String(content||'').trim()||filesHtml||statusHtml||recoveryHtml);
+    const segBodyContent=hasVisibleBody?`${filesHtml}<div class="msg-body">${bodyHtml}</div>`:'';
+    const segStableHtml=segBodyHtml+segBodyContent;
     let seg;
     if(cachedSeg
       && cachedSeg.classList.contains('assistant-segment')
       && !Array.isArray(orderedTransparentParts)  // transparent path always rebuilds
       && cachedSeg.dataset.rawText===String(content||'').trim()
-      && cachedSeg.innerHTML===segFullHtml
+      && cachedSeg.dataset.stableHtml===segStableHtml
       // Re-check worklog eligibility — a segment that was visible may now belong in worklog
       && !(messageBelongsInWorklog !== undefined && messageBelongsInWorklog && !cachedSeg.hidden)
     ){
@@ -16579,6 +16582,9 @@ function renderMessages(options){
         seg.setAttribute('data-live-assistant','1');
       }
       if(_ERR_MSG_RE.test(String(content||'').trim())) seg.dataset.error='1';
+      // P0: update footer independently — it contains position-dependent buttons
+      const footContainer=seg.querySelector('.msg-foot-container');
+      if(footContainer) footContainer.innerHTML=footHtml;
       // Reposition to correct order — appendChild on existing node moves it
       _assistantTurnBlocks(currentAssistantTurn).appendChild(seg);
       assistantSegments.set(rawIdx, seg);
@@ -16692,15 +16698,16 @@ function renderMessages(options){
       if((isCompactWorklogMode()||isTransparentStream())&&_assistantThinkingBelongsInWorklog(m, rawIdx, toolCallAssistantIdxs)) assistantThinking.set(rawIdx, thinkingText);
       else if(window._showThinking!==false) seg.insertAdjacentHTML('beforeend', _thinkingCardHtml(thinkingText));
     }
-    const hasVisibleBody=!!(String(content||'').trim()||filesHtml||statusHtml||recoveryHtml);
     if(statusHtml){
       seg.insertAdjacentHTML('beforeend', statusHtml);
     }else if(hasVisibleBody){
-      seg.insertAdjacentHTML('beforeend', `${filesHtml}<div class="msg-body">${bodyHtml}</div>${footHtml}`);
+      seg.insertAdjacentHTML('beforeend', `${filesHtml}<div class="msg-body">${bodyHtml}</div><div class="msg-foot-container">${footHtml}</div>`);
     }else if(!(thinkingText&&window._showThinking!==false&&!isSimplifiedToolCalling())){
       seg.classList.add('assistant-segment-anchor');
     }
     _assistantTurnBlocks(currentAssistantTurn).appendChild(seg);
+    // P0: stamp stable html for cache comparison on next render
+    seg.dataset.stableHtml=segStableHtml;
     assistantSegments.set(rawIdx, seg);
   }
 
