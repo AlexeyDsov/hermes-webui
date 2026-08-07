@@ -1627,11 +1627,12 @@ function _renderCacheKey(text, isUser){
   // Fold render_user_markdown state into user-message keys so toggling the
   // setting invalidates cached plain-text renders (#3870).
   const p = isUser ? (window._renderUserMarkdown ? 'um' : 'u') : 'a';
-  // Short content: use the full string as key (cheap Map lookup).
-  // Long content: length + prefix + suffix is good enough — collisions on
-  // 20-char prefix+suffix are vanishingly rare for chat messages.
-  if(text.length <= 500) return p + ':' + text;
-  return p + ':' + text.length + ':' + text.slice(0,20) + ':' + text.slice(-20);
+  // Always use the full text as the key — a compact key (length + prefix +
+  // suffix) can collide: two long messages with the same length and identical
+  // first/last 20 characters but different middles would return the wrong
+  // cached HTML.  Map<string> lookups are O(1) regardless of string length
+  // in modern engines (hash of the string contents, not a linear scan).
+  return p + ':' + text;
 }
 function _getCachedRender(text, isUser){
   const key = _renderCacheKey(text, isUser);
@@ -1643,7 +1644,7 @@ function _getCachedRender(text, isUser){
   // Evict oldest entries instead of clearing the entire cache — a full
   // clear on every overflow causes all messages to re-render their markdown
   // on the next renderMessages(), triggering GC pauses in long sessions.
-  while(_renderCache.size > _renderCacheMax) _renderCache.delete(_renderCache.keys().next().value);
+  while(_renderCache.size >= _renderCacheMax) _renderCache.delete(_renderCache.keys().next().value);
   _renderCache.set(key, rendered);
   return rendered;
 }
