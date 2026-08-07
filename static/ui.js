@@ -15992,7 +15992,6 @@ function renderMessages(options){
   _recycleStash.clear();
   // Collect assistant segments for recycling (they're inside turns, not direct children of inner)
   let _segCache=new Map();
-  let _reusedSegRawIdxs=new Set();
   {
     // Preserve the live assistant turn node — the smd parser holds a live
     // reference into it; detaching it breaks mid-stream rendering.
@@ -16118,6 +16117,7 @@ function renderMessages(options){
   }
   let _prevSepKey=null;
   let currentAssistantTurn=null;
+  let _turnFrag=null;
   // Only build question→assistant mapping for the visible window, not the
   // full visWithIdx.  The jump-to-question button is only rendered for
   // assistant messages that appear in the current render window anyway.
@@ -16262,6 +16262,8 @@ function renderMessages(options){
       // The virtual gap breaks assistant-turn adjacency. Reset the current
       // turn before rendering the always-visible tail so assistant segments do
       // not merge across the spacer boundary.
+      // P0: flush fragment for previous turn before resetting
+      if(currentAssistantTurn){const _b=_assistantTurnBlocks(currentAssistantTurn);if(_b)_b.appendChild(_turnFrag);_turnFrag=null;}
       currentAssistantTurn=null;
       inner.appendChild(_messageVirtualSpacer(virtualWindow.bottomPad,'after'));
     }
@@ -16405,6 +16407,8 @@ function renderMessages(options){
     }
 
     if(isProcessWakeup){
+      // P0: flush fragment for previous turn before resetting
+      if(currentAssistantTurn){const _b=_assistantTurnBlocks(currentAssistantTurn);if(_b)_b.appendChild(_turnFrag);_turnFrag=null;}
       currentAssistantTurn=null;
       let row=_recycleStash.get(rawIdx);
       if(row&&(!row.classList.contains('msg-row')||row.classList.contains('assistant-turn'))) row=null;
@@ -16470,6 +16474,8 @@ function renderMessages(options){
     }
 
     if(isUser){
+      // P0: flush fragment for previous turn before resetting
+      if(currentAssistantTurn){const _b=_assistantTurnBlocks(currentAssistantTurn);if(_b)_b.appendChild(_turnFrag);_turnFrag=null;}
       currentAssistantTurn=null;
       let row=_recycleStash.get(rawIdx);
       if(row&&(!row.classList.contains('msg-row')||row.classList.contains('assistant-turn'))) row=null;
@@ -16516,10 +16522,9 @@ function renderMessages(options){
       if(recycled&&!recycled.classList.contains('assistant-turn')) recycled=null;
       if(recycled){
         const blocks=_assistantTurnBlocks(recycled);
-        // P0: skip blocks.innerHTML='' — the rebuild loop below reuses cached
-        // segments via _segCache, so wiping them here would destroy the very
-        // nodes we want to recycle.  Stale segments (no longer in the render
-        // list) are removed at the end of the loop.
+        // P0: wipe blocks — segments are rebuilt into a DocumentFragment and
+        // inserted once per turn, avoiding per-segment Layout invalidations.
+        if(blocks) blocks.innerHTML='';
         for(const attr of _recycleResetAttrs) recycled.removeAttribute(attr);
         const role=recycled.querySelector('.msg-role.assistant');
         if(role) role.outerHTML=_assistantRoleHtml(tsTitle, isTpsDisplayEnabled()?_formatTurnTps(m._turnTps):'');
@@ -16531,6 +16536,10 @@ function renderMessages(options){
       if(S.session) currentAssistantTurn.dataset.sessionId=S.session.session_id;
       currentAssistantTurn.dataset.recycleKey=rawIdx;
       inner.appendChild(currentAssistantTurn);
+      // P0: collect segments into a DocumentFragment to avoid per-segment Layout
+      // invalidations (each appendChild triggers InvalidateLayout). The fragment
+      // is inserted into blocks when the turn ends (next message changes turn).
+      _turnFrag=document.createDocumentFragment();
     }
     _setLatestAssistantTurnLandmark(currentAssistantTurn, !m._live&&rawIdx===latestRenderedAssistantRawIdx);
     // P0: compute worklog eligibility before cache check so we can skip
@@ -16561,7 +16570,6 @@ function renderMessages(options){
     ){
       // Content unchanged — reuse the cached segment in-place
       seg=cachedSeg;
-      _reusedSegRawIdxs.add(rawIdx);
       // Ensure attributes are current (handles edge cases like live flag)
       seg.dataset.msgIdx=rawIdx;
       seg.dataset.sessionMsgIdx=_messageSessionIndexForRawIdx(rawIdx);
@@ -16577,14 +16585,13 @@ function renderMessages(options){
       // P0: update footer independently — it contains position-dependent buttons
       const footContainer=seg.querySelector('.msg-foot-container');
       if(footContainer) footContainer.innerHTML=footHtml;
-      // Reposition to correct order — appendChild on existing node moves it
-      _assistantTurnBlocks(currentAssistantTurn).appendChild(seg);
+      // P0: add to fragment instead of blocks directly — avoids per-segment Layout
+      _turnFrag.appendChild(seg);
       assistantSegments.set(rawIdx, seg);
       continue;
     }
     seg=document.createElement('div');
     if(Array.isArray(orderedTransparentParts)&&orderedTransparentParts.length){
-      const blocks=_assistantTurnBlocks(currentAssistantTurn);
       const sessionMsgIdx=_messageSessionIndexForRawIdx(rawIdx);
       const messageAnchorKey=_messageViewportAnchorKeyForMessage(m);
       const lastTextPartIdx=(()=>{
@@ -16613,7 +16620,7 @@ function renderMessages(options){
             segmentSeq:toolCall&&toolCall.activitySegmentSeq,
             burstId:(toolCall&&toolCall.activityBurstId)||m._activityBurstId,
           });
-          blocks.appendChild(toolRow);
+          _turnFrag.appendChild(toolRow);
           if(part.toolUseId) transparentOrderedToolIds.add(part.toolUseId);
           return;
         }
@@ -16635,7 +16642,7 @@ function renderMessages(options){
           orderedSeg.insertAdjacentHTML('beforeend', statusHtml);
         }
         orderedSeg.insertAdjacentHTML('beforeend', `${isLastTextPart?filesHtml:''}<div class="msg-body">${partBodyHtml}</div>${isLastTextPart?footHtml:''}`);
-        blocks.appendChild(orderedSeg);
+        _turnFrag.appendChild(orderedSeg);
         if(!firstSeg) firstSeg=orderedSeg;
       });
       assistantSegments.set(rawIdx, firstSeg||null);
@@ -16697,28 +16704,17 @@ function renderMessages(options){
     }else if(!(thinkingText&&window._showThinking!==false&&!isSimplifiedToolCalling())){
       seg.classList.add('assistant-segment-anchor');
     }
-    _assistantTurnBlocks(currentAssistantTurn).appendChild(seg);
+    // P0: add to fragment instead of blocks directly
+    _turnFrag.appendChild(seg);
     // P0: stamp stable html for cache comparison on next render
     seg.dataset.stableHtml=segStableHtml;
     assistantSegments.set(rawIdx, seg);
   }
 
-  // P0: remove stale segments from recycled turns — segments that were in the
-  // previous render but are no longer in the current window or had content that
-  // changed (so a fresh segment was created above).
-  for(const child of inner.children){
-    if(!child.classList?.contains('assistant-turn')) continue;
-    const blks=child.querySelector('.assistant-turn-blocks');
-    if(!blks) continue;
-    for(const s of blks.children){
-      const ri=s.dataset?.msgIdx;
-      if(ri!==undefined&&ri!==null){
-        const key=Number(ri);
-        if(!_reusedSegRawIdxs.has(key)&&assistantSegments.get(key)!==s){
-          s.remove();
-        }
-      }
-    }
+  // P0: flush any remaining fragment for the last turn
+  if(currentAssistantTurn){
+    const _blocks=_assistantTurnBlocks(currentAssistantTurn);
+    if(_blocks) _blocks.appendChild(_turnFrag);
   }
 
   function _insertCompressionLikeNode(node, anchorIndex){
