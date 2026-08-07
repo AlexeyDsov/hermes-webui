@@ -1463,6 +1463,14 @@ function _updateMessageVirtualMeasurements(renderVisWithIdx, renderVisibleIdxs, 
   let changed=false;
   let measuredCount=0;
   let measuredTotal=0;
+  // During streaming, content can mutate between renders (tool completion,
+  // new text chunks). prevSet only tracks rawIdx — it cannot detect content
+  // changes. Clear it so every row re-reads the DOM height (#P1 streaming
+  // stale-height regression).
+  const sid=S.session?S.session.session_id:null;
+  if(sid && (typeof INFLIGHT==='object'&&INFLIGHT[sid])){
+    _messageVirtualPrevMeasuredSet.clear();
+  }
   const prevSet=_messageVirtualPrevMeasuredSet;
   for(let vi=0;vi<renderVisWithIdx.length;vi++){
     const entry=renderVisWithIdx[vi];
@@ -1470,8 +1478,7 @@ function _updateMessageVirtualMeasurements(renderVisWithIdx, renderVisibleIdxs, 
     const visibleIdx=Number(renderVisibleIdxs&&renderVisibleIdxs[vi]);
     if(!Number.isFinite(visibleIdx)) continue;
     // Delta: skip DOM read for rows already measured in a prior cycle.
-    // Their cached height is still valid (content hasn't changed for settled rows,
-    // and streaming rows invalidate the cache via _clearMessageVirtualHeightCache).
+    // Only safe for settled (non-streaming) rows whose content hasn't changed.
     let totalHeight;
     if(prevSet.has(entry.rawIdx)){
       totalHeight=Number(_messageVirtualHeightCache[visibleIdx])||0;
