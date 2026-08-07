@@ -118,7 +118,9 @@ function _messageSessionIndexForRawIdx() { return 0; }
 function _messageViewportAnchorKeyForMessage() { return 'key'; }
 const assistantSegments = new Map();
 const _ERR_MSG_RE = /^ERR:/;
-// Wrap in a loop so that `continue` statements in the extracted chunk work
+// Stub document for createDocumentFragment
+const document = { createDocumentFragment() { const f = { childNodes: [], appendChild() {} }; return f; } };
+let _turnFrag = document.createDocumentFragment();
 eval(`for(let i=0;i<1;i++){${recycleChunk}}`);
 console.log(JSON.stringify({
   removedAttrs,
@@ -217,7 +219,9 @@ function _messageSessionIndexForRawIdx() { return 0; }
 function _messageViewportAnchorKeyForMessage() { return 'key'; }
 const assistantSegments = new Map();
 const _ERR_MSG_RE = /^ERR:/;
-// Wrap in a loop so that `continue` statements in the extracted chunk work
+// Stub document for createDocumentFragment
+const document = { createDocumentFragment() { const f = { childNodes: [], appendChild() {} }; return f; } };
+let _turnFrag = document.createDocumentFragment();
 eval(`for(let i=0;i<1;i++){${recycleChunk}}`);
 console.log(JSON.stringify({
   blocksInnerHTML: blocks.innerHTML,
@@ -232,8 +236,9 @@ console.log(JSON.stringify({
 """
     result = _run_node(script)
 
-    # P0: blocks.innerHTML is no longer cleared — segments are recycled in-place
-    assert result["blocksInnerHTML"] == "keep me"
+    # P0: blocks.innerHTML is cleared again — segments are collected into a
+    # DocumentFragment and inserted once per turn, avoiding per-segment Layout.
+    assert result["blocksInnerHTML"] == ""
     assert result["roleHtml"] == "role:Turn title:tps:42"
     assert result["currentAssistantTurnIsRecycled"] is True
     assert result["dataset"] == {
