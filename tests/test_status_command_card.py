@@ -88,12 +88,12 @@ function makeSeg() {{
 }}
 
 const ordinaryBlock = extractBlock(
-  "const hasVisibleBody=!!(String(content||'').trim()||filesHtml||recoveryHtml);",
-  "_assistantTurnBlocks(currentAssistantTurn).appendChild(seg);"
+  "if(statusHtml){{",
+  "// P0: add to fragment instead of blocks directly"
 );
 const orderedBlock = extractBlock(
   "if(isLastTextPart&&statusHtml){{",
-  "blocks.appendChild(orderedSeg);"
+  "_turnFrag.appendChild(orderedSeg);"
 );
 
 function runBaseOrdinary(opts) {{
@@ -107,11 +107,11 @@ function runBaseOrdinary(opts) {{
   const thinkingText = opts.thinkingText || '';
   const window = {{ _showThinking: opts.showThinking !== false }};
   function isSimplifiedToolCalling() {{ return !!opts.simplified; }}
-  const hasVisibleBody = !!(String(content || '').trim() || filesHtml || statusHtml || recoveryHtml);
+  const hasVisibleBody = !!(String(content || '').trim() || filesHtml || recoveryHtml);
   if (statusHtml) {{
     seg.insertAdjacentHTML('beforeend', statusHtml);
   }} else if (hasVisibleBody) {{
-    seg.insertAdjacentHTML('beforeend', `${{filesHtml}}<div class="msg-body">${{bodyHtml}}</div>${{footHtml}}`);
+    seg.insertAdjacentHTML('beforeend', `${{filesHtml}}<div class="msg-body">${{bodyHtml}}</div><div class="msg-foot-container">${{footHtml}}</div>`);
   }} else if (!(thinkingText && window._showThinking !== false && !isSimplifiedToolCalling())) {{
     seg.classList.add('assistant-segment-anchor');
   }}
@@ -129,6 +129,7 @@ function runHeadOrdinary(opts) {{
   const thinkingText = opts.thinkingText || '';
   const window = {{ _showThinking: opts.showThinking !== false }};
   function isSimplifiedToolCalling() {{ return !!opts.simplified; }}
+  const hasVisibleBody = !!(String(content || '').trim() || filesHtml || recoveryHtml);
   eval(ordinaryBlock);
   return seg;
 }}
@@ -202,7 +203,7 @@ console.log(JSON.stringify({{
   ordinaryNoStatus: {{
     html: ordinaryNoStatus.html,
     isBodyOnly:
-      ordinaryNoStatus.html === '<div class="msg-body"><p>Final report</p></div><footer>meta</footer>',
+      ordinaryNoStatus.html === '<div class="msg-body"><p>Final report</p></div><div class="msg-foot-container"><footer>meta</footer></div>',
   }},
   filesOnlyWithStatus: {{
     html: filesOnlyWithStatus.html,
@@ -291,7 +292,7 @@ def test_render_messages_keeps_body_only_boundary_without_status_card():
     probe = _status_render_probe()
     ordinary_no_status = probe["ordinaryNoStatus"]
     assert ordinary_no_status["isBodyOnly"] is True
-    assert ordinary_no_status["html"] == "<div class=\"msg-body\"><p>Final report</p></div><footer>meta</footer>"
+    assert ordinary_no_status["html"] == "<div class=\"msg-body\"><p>Final report</p></div><div class=\"msg-foot-container\"><footer>meta</footer></div>"
 
 
 def test_render_messages_keeps_files_when_status_card_present():

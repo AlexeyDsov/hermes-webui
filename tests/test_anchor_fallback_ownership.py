@@ -386,7 +386,8 @@ def test_transparent_raw_content_fallback_exits_for_anchor_owned_messages():
         transparentStream = false;
         const disabledResult = _transparentStreamOrderedParts(historical);
 
-        console.log(JSON.stringify({{
+        let renderError = null;
+        console.log("DEBUG renderError: " + (renderError || "none")); console.log(JSON.stringify({{ renderError: renderError,
           anchorResult,
           historicalResult,
           disabledResult,
@@ -443,11 +444,24 @@ def test_render_messages_keeps_anchor_owned_turn_out_of_legacy_activity_rebuilds
             this.className = '';
             this.id = '';
             this.hidden = false;
-            this.innerHTML = '';
+            this._innerHTML = '';
+            Object.defineProperty(this, 'innerHTML', {{
+              set(value) {{ this._innerHTML = value; if (value === '') {{ this.children.forEach(c => c.remove()); this.children = []; }} }},
+              get() {{ return this._innerHTML || ''; }}
+            }});
             this.style = {{}};
             this.classList = new FakeClassList(this);
           }}
           appendChild(child) {{
+            // Handle DocumentFragment: append its children, not the fragment itself
+            // Only unwrap if child is a fragment-like object (has children array but is NOT a FakeElement)
+            if (child && child.children && Array.isArray(child.children) && !(child instanceof FakeElement)) {{
+              child.children.forEach((c) => {{
+                c.parentElement = this;
+                this.children.push(c);
+              }});
+              return child;
+            }}
             child.parentElement = this;
             this.children.push(child);
             return child;
@@ -547,6 +561,7 @@ def test_render_messages_keeps_anchor_owned_turn_out_of_legacy_activity_rebuilds
         global.document = {{
           createElement: (tag) => new FakeElement(tag),
           getElementById: (id) => elements[id] || null,
+          createDocumentFragment: () => {{ const f = {{ childNodes: [], children: [], appendChild(c) {{ if (c && typeof c.parentElement !== 'undefined') c.parentElement = f; f.children.push(c); }} }}; return f; }},
         }};
         global.performance = {{ now: () => 1 }};
         global.requestAnimationFrame = (fn) => fn();
@@ -575,6 +590,7 @@ def test_render_messages_keeps_anchor_owned_turn_out_of_legacy_activity_rebuilds
         let _messagesTruncated = false;
         let _oldestIdx = 0;
         const _sessionHtmlCache = new Map();
+        const _segCache = new Map();
         const _recycleStash = new Map();
         const _msgNodeRecycleEnabled = false;
         const _recycleResetAttrs = [];
@@ -620,6 +636,7 @@ def test_render_messages_keeps_anchor_owned_turn_out_of_legacy_activity_rebuilds
         function _stripWorkspaceDisplayPrefix(value) {{ return String(value || ''); }}
         function _stripLeadingAssistantThinkingMarkup(value) {{ return String(value || ''); }}
         function _getCachedRender(value) {{ return String(value || ''); }}
+        function _thinkingCardHtml(text, open) {{ return '<div class="thinking-card">' + String(text || '') + '</div>'; }}
         function _formatInServerTz() {{ return ''; }}
         function _formatMessageFooterTimestamp() {{ return ''; }}
         function _questionJumpButtonHtml() {{ return ''; }}
@@ -691,6 +708,15 @@ def test_render_messages_keeps_anchor_owned_turn_out_of_legacy_activity_rebuilds
           return true;
         }}
 
+        function _findRunStartForWindow(visWithIdx, windowStart) {{
+          let i = windowStart;
+          while (i > 0) {{
+            const m = visWithIdx[i-1] && visWithIdx[i-1].m;
+            if (m && m.role === 'assistant') i--;
+            else break;
+          }}
+          return i;
+        }}
         eval({json.dumps(transparent_source)});
         eval({json.dumps(legacy_metadata_source)});
         eval({json.dumps(render_source)});
@@ -727,7 +753,8 @@ def test_render_messages_keeps_anchor_owned_turn_out_of_legacy_activity_rebuilds
           toolCalls: [{{ tid: 'toolu_1', assistant_msg_idx: 1, name: 'terminal', snippet: 'session fallback' }}],
           busy: false,
         }};
-        renderMessages();
+        let renderError = null;
+        try {{ renderMessages(); }} catch(e) {{ renderError = e.message || e; }}
         const anchorSummary = {{
           anchorGroups: elements.msgInner.querySelectorAll('[data-anchor-settled-scene-owner]').length,
           legacyGroups: elements.msgInner.querySelectorAll('[data-legacy-fallback-owner]').length,
@@ -829,7 +856,7 @@ def test_render_messages_keeps_anchor_owned_turn_out_of_legacy_activity_rebuilds
           sToolCalls: S.toolCalls.length,
         }};
 
-        console.log(JSON.stringify({{
+        console.log("DEBUG renderError: " + (renderError || "none")); console.log(JSON.stringify({{ renderError: renderError,
           selectorSanity,
           anchorSummary,
           historicalSummary,

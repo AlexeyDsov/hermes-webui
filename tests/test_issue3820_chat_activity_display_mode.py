@@ -757,7 +757,18 @@ def test_transparent_stream_static_branch_bypasses_worklog_summary_and_adds_even
     assert "isSimplifiedToolCalling()" not in UI_JS[render_message_start:render_message_end]
 
     thinking_store_start = UI_JS.index("if(thinkingText&&window._showThinking!==false)")
-    thinking_store_end = UI_JS.index("const hasVisibleBody=", thinking_store_start)
+    # The thinking block is self-contained: { if(...) assistantThinking.set(...); }
+    # Find the matching closing brace
+    brace_count = 0
+    thinking_store_end = thinking_store_start
+    for i in range(thinking_store_start, len(UI_JS)):
+        if UI_JS[i] == '{':
+            brace_count += 1
+        elif UI_JS[i] == '}':
+            brace_count -= 1
+            if brace_count == 0:
+                thinking_store_end = i + 1
+                break
     thinking_store_block = UI_JS[thinking_store_start:thinking_store_end]
     assert "isTransparentStream()" in thinking_store_block
     assert "assistantThinking.set(rawIdx, thinkingText)" in thinking_store_block
