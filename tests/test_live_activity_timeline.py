@@ -91,7 +91,7 @@ def test_settled_activity_render_keeps_tools_bound_to_progress_bursts():
 
 def test_settled_final_answer_segment_is_not_folded_into_worklog():
     helper = _function_source(UI_JS, "_assistantMessageBelongsInWorklog")
-    render_fn = UI_JS.split("const messageBelongsInWorklog=", 1)[1].split("if(_ERR_MSG_RE", 1)[0]
+    render_fn = UI_JS.split("const messageBelongsInWorklog=", 1)[1].split("_reasoningPayload=_assistantReasoningPayloadText(m)", 1)[0]
 
     assert "hasVisibleText&&isTurnFinalAssistant" in helper
     assert "return false;" in helper

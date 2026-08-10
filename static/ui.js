@@ -16814,7 +16814,7 @@ function renderMessages(options){
     // (retryBtn, questionJumpBtn) that change when the virtual window shifts.
     // Body and footer are in separate containers so the footer can be updated
     // independently on cached segments.
-    const hasVisibleBody=!!(String(content||'').trim()||filesHtml||statusHtml||recoveryHtml);
+    const hasVisibleBody=!!(String(content||'').trim()||filesHtml||recoveryHtml);
     const segBodyContent=hasVisibleBody?`${filesHtml}<div class="msg-body">${bodyHtml}</div>`:'';
     const segStableHtml=segBodyHtml+segBodyContent;
     let seg;
